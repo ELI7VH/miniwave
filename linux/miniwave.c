@@ -1,7 +1,8 @@
 /* miniwave — modular rack host for waveOS
  *
  * 16 instrument slots, MIDI-by-channel routing, stereo mix,
- * OSC control surface on UDP port 9000.
+ * OSC control surface on UDP port 9000,
+ * embedded HTTP + SSE server for browser-based WaveUI.
  */
 
 #define _GNU_SOURCE
@@ -19,8 +20,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -75,6 +79,7 @@ static int osc_write_string(uint8_t *buf, int max, const char *str) {
 #define CHANNELS         2
 #define DEFAULT_PERIOD   64
 #define DEFAULT_OSC_PORT 9000
+#define DEFAULT_HTTP_PORT 8080
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -82,6 +87,12 @@ static int osc_write_string(uint8_t *buf, int max, const char *str) {
 
 #define LIMITER_THRESHOLD 0.7f
 #define LIMITER_CEILING   0.95f
+
+/* ── HTTP / SSE Server Constants ───────────────────────────────────── */
+
+#define MAX_HTTP_CLIENTS  16
+#define HTTP_BUF_SIZE     8192
+#define SSE_BUF_SIZE      16384
 
 /* ── Shared Memory Bus ──────────────────────────────────────────────── */
 
@@ -709,6 +720,745 @@ static void bus_write(WaveosBus *bus, int slot, float *stereo_frames, int count)
     atomic_store(&s->write_pos, wp + count);
 }
 
+/* ── HTTP / SSE Server ──────────────────────────────────────────────── */
+
+/* Loaded from disk at startup */
+static char *g_html_content = NULL;
+static size_t g_html_length = 0;
+
+typedef struct {
+    int  fd;
+    int  is_sse;           /* 1 = SSE stream client */
+    int  detail_channel;   /* which channel for detail polling, -1 = none */
+} HttpClient;
+
+static HttpClient g_http_clients[MAX_HTTP_CLIENTS];
+static pthread_mutex_t g_http_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Resolve executable directory and load web/index.html */
+static void http_load_html(void) {
+    char exe_path[1024];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0) {
+        fprintf(stderr, "[http] can't resolve /proc/self/exe\n");
+        return;
+    }
+    exe_path[len] = '\0';
+
+    /* Strip binary name to get directory */
+    char *slash = strrchr(exe_path, '/');
+    if (slash) *(slash + 1) = '\0';
+
+    char html_path[1280];
+    snprintf(html_path, sizeof(html_path), "%sweb/index.html", exe_path);
+
+    FILE *f = fopen(html_path, "r");
+    if (!f) {
+        fprintf(stderr, "[http] index.html not found at %s\n", html_path);
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (sz <= 0 || sz > 2 * 1024 * 1024) {
+        fprintf(stderr, "[http] index.html bad size: %ld\n", sz);
+        fclose(f);
+        return;
+    }
+
+    g_html_content = malloc((size_t)sz + 1);
+    if (!g_html_content) { fclose(f); return; }
+
+    g_html_length = fread(g_html_content, 1, (size_t)sz, f);
+    g_html_content[g_html_length] = '\0';
+    fclose(f);
+
+    fprintf(stderr, "[http] loaded index.html (%zu bytes)\n", g_html_length);
+}
+
+/* ── JSON helpers (simple string-based extraction) ─────────────────── */
+
+static int json_get_string(const char *json, const char *key, char *out, int max) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return -1;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '"') return -1;
+    p++;
+    int i = 0;
+    while (*p && *p != '"' && i < max - 1) {
+        if (*p == '\\' && *(p + 1)) { p++; }
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return 0;
+}
+
+static int json_get_int(const char *json, const char *key, int *out) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return -1;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p == '"') { /* string-encoded number */
+        p++;
+        *out = atoi(p);
+        return 0;
+    }
+    if ((*p >= '0' && *p <= '9') || *p == '-') {
+        *out = atoi(p);
+        return 0;
+    }
+    return -1;
+}
+
+static int json_get_float(const char *json, const char *key, float *out) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return -1;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == ':') p++;
+    if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.') {
+        *out = strtof(p, NULL);
+        return 0;
+    }
+    return -1;
+}
+
+/* Extract first int from a JSON array field, e.g. "iargs":[42] */
+static int json_get_iarray_first(const char *json, const char *key, int *out) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return -1;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '[') return -1;
+    p++;
+    while (*p == ' ') p++;
+    if ((*p >= '0' && *p <= '9') || *p == '-') {
+        *out = atoi(p);
+        return 0;
+    }
+    return -1;
+}
+
+static int json_get_farray_first(const char *json, const char *key, float *out) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (!p) return -1;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '[') return -1;
+    p++;
+    while (*p == ' ') p++;
+    if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.') {
+        *out = strtof(p, NULL);
+        return 0;
+    }
+    return -1;
+}
+
+/* ── Build JSON responses from rack state ──────────────────────────── */
+
+static int build_rack_status_json(char *buf, int max) {
+    int pos = 0;
+    pos += snprintf(buf + pos, (size_t)(max - pos),
+        "{\"type\":\"rack_status\",\"slots\":[");
+
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        RackSlot *slot = &g_rack.slots[i];
+        const char *tname = "";
+        if (slot->active && slot->type_idx >= 0 && slot->type_idx < g_n_types)
+            tname = g_type_registry[slot->type_idx]->name;
+
+        pos += snprintf(buf + pos, (size_t)(max - pos),
+            "%s{\"active\":%d,\"type\":\"%s\",\"volume\":%.4f,\"mute\":%d,\"solo\":%d}",
+            i ? "," : "", slot->active, tname, (double)slot->volume,
+            slot->mute, slot->solo);
+    }
+
+    pos += snprintf(buf + pos, (size_t)(max - pos),
+        "],\"master_volume\":%.4f,\"midi_device\":\"%s\"}",
+        (double)g_rack.master_volume, g_midi_device_name);
+
+    return pos;
+}
+
+static int build_rack_types_json(char *buf, int max) {
+    int pos = 0;
+    pos += snprintf(buf + pos, (size_t)(max - pos), "{\"type\":\"rack_types\",\"types\":[");
+    for (int i = 0; i < g_n_types; i++) {
+        pos += snprintf(buf + pos, (size_t)(max - pos),
+            "%s\"%s\"", i ? "," : "", g_type_registry[i]->name);
+    }
+    pos += snprintf(buf + pos, (size_t)(max - pos), "]}");
+    return pos;
+}
+
+static int build_midi_devices_json(char *buf, int max) {
+    char devs[16][64];
+    char devnames[16][128];
+    int ndevs = list_midi_devices(devs, devnames, 16);
+
+    int pos = 0;
+    pos += snprintf(buf + pos, (size_t)(max - pos), "{\"type\":\"midi_devices\",\"devices\":[");
+    for (int i = 0; i < ndevs; i++) {
+        /* Escape any special chars in name */
+        pos += snprintf(buf + pos, (size_t)(max - pos),
+            "%s{\"id\":\"%s\",\"name\":\"%s\"}", i ? "," : "",
+            devs[i], devnames[i]);
+    }
+    pos += snprintf(buf + pos, (size_t)(max - pos), "]}");
+    return pos;
+}
+
+static int build_ch_status_json(int ch, char *buf, int max) {
+    RackSlot *slot = &g_rack.slots[ch];
+    if (!slot->active || !slot->state || slot->type_idx < 0)
+        return snprintf(buf, (size_t)max,
+            "{\"type\":\"ch_status\",\"channel\":%d}", ch);
+
+    /* For FM synth, read the state directly */
+    FMSynth *s = (FMSynth *)slot->state;
+    const char *pname = (s->current_preset >= 0 && s->current_preset < NUM_PRESETS)
+                        ? PRESET_NAMES[s->current_preset] : "Unknown";
+
+    float params[8];
+    if (s->live_params.override) {
+        params[0] = s->live_params.carrier_ratio;
+        params[1] = s->live_params.mod_ratio;
+        params[2] = s->live_params.mod_index;
+        params[3] = s->live_params.attack;
+        params[4] = s->live_params.decay;
+        params[5] = s->live_params.sustain;
+        params[6] = s->live_params.release;
+        params[7] = s->live_params.feedback;
+    } else {
+        const FMPreset *ep = &PRESETS[s->current_preset];
+        params[0] = ep->carrier_ratio;
+        params[1] = ep->mod_ratio;
+        params[2] = ep->mod_index;
+        params[3] = ep->attack;
+        params[4] = ep->decay;
+        params[5] = ep->sustain;
+        params[6] = ep->release;
+        params[7] = ep->feedback;
+    }
+
+    int active_voices = 0;
+    for (int v = 0; v < FM_MAX_VOICES; v++)
+        if (s->voices[v].active) active_voices++;
+
+    return snprintf(buf, (size_t)max,
+        "{\"type\":\"ch_status\",\"channel\":%d,"
+        "\"preset_index\":%d,\"preset_name\":\"%s\","
+        "\"volume\":%.4f,\"override\":%d,"
+        "\"params\":{"
+        "\"carrier_ratio\":%.4f,\"mod_ratio\":%.4f,\"mod_index\":%.4f,"
+        "\"attack\":%.4f,\"decay\":%.4f,\"sustain\":%.4f,"
+        "\"release\":%.4f,\"feedback\":%.4f},"
+        "\"active_voices\":%d}",
+        ch, s->current_preset, pname,
+        (double)s->volume, s->live_params.override,
+        (double)params[0], (double)params[1], (double)params[2],
+        (double)params[3], (double)params[4], (double)params[5],
+        (double)params[6], (double)params[7],
+        active_voices);
+}
+
+static const char *OSC_SPEC_JSON =
+    "{\"name\":\"miniwave\",\"version\":\"1.0\","
+    "\"transports\":[\"osc-udp\",\"http-sse\"],"
+    "\"osc_port\":9000,\"http_port\":8080,"
+    "\"endpoints\":["
+    "{\"path\":\"/rack/slot/set\",\"args\":\"is\",\"desc\":\"Set slot instrument\"},"
+    "{\"path\":\"/rack/slot/clear\",\"args\":\"i\",\"desc\":\"Clear slot\"},"
+    "{\"path\":\"/rack/slot/volume\",\"args\":\"if\",\"desc\":\"Set slot volume\"},"
+    "{\"path\":\"/rack/slot/mute\",\"args\":\"ii\",\"desc\":\"Mute slot\"},"
+    "{\"path\":\"/rack/slot/solo\",\"args\":\"ii\",\"desc\":\"Solo slot\"},"
+    "{\"path\":\"/rack/master\",\"args\":\"f\",\"desc\":\"Master volume\"},"
+    "{\"path\":\"/rack/status\",\"args\":\"\",\"desc\":\"Get rack status\"},"
+    "{\"path\":\"/rack/types\",\"args\":\"\",\"desc\":\"Get instrument types\"},"
+    "{\"path\":\"/ch/N/preset\",\"args\":\"i\",\"desc\":\"Set preset\"},"
+    "{\"path\":\"/ch/N/param/KEY\",\"args\":\"f\",\"desc\":\"Set parameter\"}"
+    "]}";
+
+/* ── HTTP response helpers ─────────────────────────────────────────── */
+
+/* Suppress warn_unused_result for fire-and-forget network writes */
+static inline ssize_t http_write(int fd, const void *buf, size_t len) {
+    ssize_t r = write(fd, buf, len);
+    return r; /* caller may ignore */
+}
+
+static void http_send_response(int fd, int status, const char *content_type,
+                                const char *body, int body_len) {
+    const char *status_text = (status == 200) ? "OK" :
+                              (status == 204) ? "No Content" :
+                              (status == 404) ? "Not Found" :
+                              (status == 405) ? "Method Not Allowed" :
+                              "Error";
+    char header[512];
+    int hlen = snprintf(header, sizeof(header),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %d\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status, status_text, content_type, body_len);
+
+    http_write(fd, header, (size_t)hlen);
+    if (body && body_len > 0)
+        http_write(fd, body, (size_t)body_len);
+}
+
+static void http_send_sse_headers(int fd) {
+    const char *resp =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "\r\n";
+    http_write(fd, resp, strlen(resp));
+}
+
+static int sse_send_event(int fd, const char *event, const char *data) {
+    char buf[SSE_BUF_SIZE];
+    int len = snprintf(buf, sizeof(buf), "event: %s\ndata: %s\n\n", event, data);
+    if (len <= 0 || len >= (int)sizeof(buf)) return -1;
+    ssize_t w = write(fd, buf, (size_t)len);
+    return (w > 0) ? 0 : -1;
+}
+
+/* Send SSE event to all connected SSE clients */
+static void sse_broadcast(const char *event, const char *json_data) {
+    pthread_mutex_lock(&g_http_lock);
+    for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+        if (g_http_clients[i].fd >= 0 && g_http_clients[i].is_sse) {
+            if (sse_send_event(g_http_clients[i].fd, event, json_data) < 0) {
+                close(g_http_clients[i].fd);
+                g_http_clients[i].fd = -1;
+                g_http_clients[i].is_sse = 0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_http_lock);
+}
+
+/* ── POST /api handler ─────────────────────────────────────────────── */
+
+static void http_handle_api(int fd, const char *body) {
+    char type_str[64] = "";
+    json_get_string(body, "type", type_str, sizeof(type_str));
+
+    char resp[SSE_BUF_SIZE];
+    int rlen = 0;
+
+    if (strcmp(type_str, "slot_set") == 0) {
+        int ch = 0;
+        char instr[64] = "";
+        json_get_int(body, "channel", &ch);
+        json_get_string(body, "instrument", instr, sizeof(instr));
+        rack_set_slot(ch, instr);
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "slot_clear") == 0) {
+        int ch = 0;
+        json_get_int(body, "channel", &ch);
+        rack_clear_slot(ch);
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "slot_volume") == 0) {
+        int ch = 0;
+        float val = 1.0f;
+        json_get_int(body, "channel", &ch);
+        json_get_float(body, "value", &val);
+        if (ch >= 0 && ch < MAX_SLOTS) {
+            if (val < 0.0f) val = 0.0f;
+            if (val > 1.0f) val = 1.0f;
+            g_rack.slots[ch].volume = val;
+        }
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "slot_mute") == 0) {
+        int ch = 0, val = 0;
+        json_get_int(body, "channel", &ch);
+        json_get_int(body, "value", &val);
+        if (ch >= 0 && ch < MAX_SLOTS)
+            g_rack.slots[ch].mute = val ? 1 : 0;
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "slot_solo") == 0) {
+        int ch = 0, val = 0;
+        json_get_int(body, "channel", &ch);
+        json_get_int(body, "value", &val);
+        if (ch >= 0 && ch < MAX_SLOTS)
+            g_rack.slots[ch].solo = val ? 1 : 0;
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "master_volume") == 0) {
+        float val = 0.75f;
+        json_get_float(body, "value", &val);
+        if (val < 0.0f) val = 0.0f;
+        if (val > 1.0f) val = 1.0f;
+        g_rack.master_volume = val;
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "rack_status") == 0) {
+        rlen = build_rack_status_json(resp, (int)sizeof(resp));
+    }
+    else if (strcmp(type_str, "rack_types") == 0) {
+        rlen = build_rack_types_json(resp, (int)sizeof(resp));
+    }
+    else if (strcmp(type_str, "midi_devices") == 0) {
+        rlen = build_midi_devices_json(resp, (int)sizeof(resp));
+    }
+    else if (strcmp(type_str, "ch_status") == 0) {
+        int ch = 0;
+        json_get_int(body, "channel", &ch);
+        if (ch >= 0 && ch < MAX_SLOTS)
+            rlen = build_ch_status_json(ch, resp, (int)sizeof(resp));
+        else
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"invalid channel\"}");
+    }
+    else if (strcmp(type_str, "detail_close") == 0) {
+        /* Client no longer wants detail updates — handled via SSE client state */
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "ch") == 0) {
+        int ch = 0;
+        char path[128] = "";
+        json_get_int(body, "channel", &ch);
+        json_get_string(body, "path", path, sizeof(path));
+
+        if (ch >= 0 && ch < MAX_SLOTS) {
+            RackSlot *slot = &g_rack.slots[ch];
+            if (slot->active && slot->state) {
+                InstrumentType *itype = g_type_registry[slot->type_idx];
+                int32_t iargs[8] = {0};
+                float fargs[8] = {0};
+                int ni = 0, nf = 0;
+
+                int ival;
+                if (json_get_iarray_first(body, "iargs", &ival) == 0) {
+                    iargs[0] = ival;
+                    ni = 1;
+                }
+                float fval;
+                if (json_get_farray_first(body, "fargs", &fval) == 0) {
+                    fargs[0] = fval;
+                    nf = 1;
+                }
+
+                itype->osc_handle(slot->state, path, iargs, ni, fargs, nf);
+            }
+        }
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "note_on") == 0) {
+        int ch = 0, note = 60, vel = 100;
+        json_get_int(body, "channel", &ch);
+        json_get_int(body, "note", &note);
+        json_get_int(body, "velocity", &vel);
+        if (ch >= 0 && ch < MAX_SLOTS) {
+            RackSlot *slot = &g_rack.slots[ch];
+            if (slot->active && slot->state) {
+                InstrumentType *itype = g_type_registry[slot->type_idx];
+                uint8_t status_byte = (uint8_t)(0x90 | (ch & 0x0F));
+                itype->midi(slot->state, status_byte,
+                            (uint8_t)note, (uint8_t)vel);
+            }
+        }
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "note_off") == 0) {
+        int ch = 0, note = 60;
+        json_get_int(body, "channel", &ch);
+        json_get_int(body, "note", &note);
+        if (ch >= 0 && ch < MAX_SLOTS) {
+            RackSlot *slot = &g_rack.slots[ch];
+            if (slot->active && slot->state) {
+                InstrumentType *itype = g_type_registry[slot->type_idx];
+                uint8_t status_byte = (uint8_t)(0x80 | (ch & 0x0F));
+                itype->midi(slot->state, status_byte, (uint8_t)note, 0);
+            }
+        }
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
+    else if (strcmp(type_str, "midi_device") == 0) {
+        /* MIDI device switch not implemented via HTTP — use OSC */
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true,\"note\":\"use OSC for MIDI switch\"}");
+    }
+    else {
+        rlen = snprintf(resp, sizeof(resp), "{\"error\":\"unknown type: %s\"}", type_str);
+    }
+
+    http_send_response(fd, 200, "application/json", resp, rlen);
+}
+
+/* ── HTTP thread: accept, parse, route ─────────────────────────────── */
+
+typedef struct {
+    int port;
+} HttpThreadCtx;
+
+static void *http_thread_fn(void *arg) {
+    HttpThreadCtx *ctx = (HttpThreadCtx *)arg;
+
+    /* Init client slots */
+    pthread_mutex_lock(&g_http_lock);
+    for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+        g_http_clients[i].fd = -1;
+        g_http_clients[i].is_sse = 0;
+        g_http_clients[i].detail_channel = -1;
+    }
+    pthread_mutex_unlock(&g_http_lock);
+
+    /* Create listen socket */
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        fprintf(stderr, "[http] socket error: %s\n", strerror(errno));
+        return NULL;
+    }
+
+    int reuse = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons((uint16_t)ctx->port);
+
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[http] bind error on port %d: %s\n",
+                ctx->port, strerror(errno));
+        close(listen_fd);
+        return NULL;
+    }
+
+    if (listen(listen_fd, 8) < 0) {
+        fprintf(stderr, "[http] listen error: %s\n", strerror(errno));
+        close(listen_fd);
+        return NULL;
+    }
+
+    /* Make listen socket non-blocking */
+    fcntl(listen_fd, F_SETFL, O_NONBLOCK);
+
+    fprintf(stderr, "[http] WaveUI at http://0.0.0.0:%d\n", ctx->port);
+
+    /* Polling loop: accept new connections + push SSE updates */
+    struct timespec last_rack_poll = {0, 0};
+    struct timespec last_detail_poll = {0, 0};
+
+    while (!g_quit) {
+        /* Accept new connections (non-blocking) */
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+
+        if (client_fd >= 0) {
+            /* Set recv timeout so we don't block forever reading the request */
+            struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+            setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            /* Disable Nagle for responsiveness */
+            int flag = 1;
+            setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+            /* Read HTTP request */
+            char reqbuf[HTTP_BUF_SIZE];
+            memset(reqbuf, 0, sizeof(reqbuf));
+            ssize_t nread = recv(client_fd, reqbuf, sizeof(reqbuf) - 1, 0);
+
+            if (nread > 0) {
+                reqbuf[nread] = '\0';
+
+                /* Parse method and path */
+                char method[8] = "";
+                char path[256] = "";
+                sscanf(reqbuf, "%7s %255s", method, path);
+
+                /* Handle CORS preflight */
+                if (strcmp(method, "OPTIONS") == 0) {
+                    http_send_response(client_fd, 204, "text/plain", "", 0);
+                    close(client_fd);
+                }
+                /* GET / — serve index.html */
+                else if (strcmp(method, "GET") == 0 &&
+                         (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+                    if (g_html_content) {
+                        http_send_response(client_fd, 200, "text/html; charset=utf-8",
+                                           g_html_content, (int)g_html_length);
+                    } else {
+                        const char *fallback =
+                            "<html><body style='background:#111;color:#e0e0e0;"
+                            "font-family:monospace;padding:40px'>"
+                            "<h1>WaveUI not found</h1>"
+                            "<p>Place web/index.html next to the miniwave binary.</p>"
+                            "</body></html>";
+                        http_send_response(client_fd, 200, "text/html",
+                                           fallback, (int)strlen(fallback));
+                    }
+                    close(client_fd);
+                }
+                /* GET /osc-spec — serve OSC spec JSON */
+                else if (strcmp(method, "GET") == 0 && strcmp(path, "/osc-spec") == 0) {
+                    http_send_response(client_fd, 200, "application/json",
+                                       OSC_SPEC_JSON, (int)strlen(OSC_SPEC_JSON));
+                    close(client_fd);
+                }
+                /* GET /events — SSE stream */
+                else if (strcmp(method, "GET") == 0 && strcmp(path, "/events") == 0) {
+                    /* Make non-blocking for SSE */
+                    fcntl(client_fd, F_SETFL, O_NONBLOCK);
+
+                    http_send_sse_headers(client_fd);
+
+                    /* Register as SSE client */
+                    int registered = 0;
+                    pthread_mutex_lock(&g_http_lock);
+                    for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+                        if (g_http_clients[i].fd < 0) {
+                            g_http_clients[i].fd = client_fd;
+                            g_http_clients[i].is_sse = 1;
+                            g_http_clients[i].detail_channel = -1;
+                            registered = 1;
+                            break;
+                        }
+                    }
+                    pthread_mutex_unlock(&g_http_lock);
+
+                    if (!registered) {
+                        close(client_fd);
+                    } else {
+                        /* Send initial state immediately */
+                        char json[SSE_BUF_SIZE];
+                        build_rack_status_json(json, (int)sizeof(json));
+                        sse_send_event(client_fd, "rack_status", json);
+
+                        build_rack_types_json(json, (int)sizeof(json));
+                        sse_send_event(client_fd, "rack_types", json);
+
+                        build_midi_devices_json(json, (int)sizeof(json));
+                        sse_send_event(client_fd, "midi_devices", json);
+                    }
+                    /* Don't close — keep alive for SSE */
+                }
+                /* POST /api — JSON command */
+                else if (strcmp(method, "POST") == 0 && strcmp(path, "/api") == 0) {
+                    /* Find body after \r\n\r\n */
+                    const char *body = strstr(reqbuf, "\r\n\r\n");
+                    if (body) {
+                        body += 4;
+                        http_handle_api(client_fd, body);
+                    } else {
+                        http_send_response(client_fd, 400, "application/json",
+                                           "{\"error\":\"no body\"}", 18);
+                    }
+                    close(client_fd);
+                }
+                /* POST /api/detail — set SSE detail channel */
+                else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/detail") == 0) {
+                    const char *body = strstr(reqbuf, "\r\n\r\n");
+                    int detail_ch = -1;
+                    if (body) {
+                        body += 4;
+                        json_get_int(body, "channel", &detail_ch);
+                    }
+
+                    /* Update all SSE clients' detail channel */
+                    pthread_mutex_lock(&g_http_lock);
+                    for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+                        if (g_http_clients[i].fd >= 0 && g_http_clients[i].is_sse) {
+                            g_http_clients[i].detail_channel = detail_ch;
+                        }
+                    }
+                    pthread_mutex_unlock(&g_http_lock);
+
+                    http_send_response(client_fd, 200, "application/json",
+                                       "{\"ok\":true}", 11);
+                    close(client_fd);
+                }
+                else {
+                    http_send_response(client_fd, 404, "text/plain",
+                                       "Not Found", 9);
+                    close(client_fd);
+                }
+            } else {
+                close(client_fd);
+            }
+        }
+
+        /* ── Periodic SSE push ─────────────────────────────────── */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+
+        /* Rack status every 500ms */
+        long rack_elapsed_ms = (now.tv_sec - last_rack_poll.tv_sec) * 1000 +
+                               (now.tv_nsec - last_rack_poll.tv_nsec) / 1000000;
+        if (rack_elapsed_ms >= 500) {
+            last_rack_poll = now;
+            char json[SSE_BUF_SIZE];
+            build_rack_status_json(json, (int)sizeof(json));
+            sse_broadcast("rack_status", json);
+        }
+
+        /* Detail channel status every 200ms */
+        long detail_elapsed_ms = (now.tv_sec - last_detail_poll.tv_sec) * 1000 +
+                                 (now.tv_nsec - last_detail_poll.tv_nsec) / 1000000;
+        if (detail_elapsed_ms >= 200) {
+            last_detail_poll = now;
+            /* Find if any SSE client wants detail */
+            int detail_ch = -1;
+            pthread_mutex_lock(&g_http_lock);
+            for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+                if (g_http_clients[i].fd >= 0 && g_http_clients[i].is_sse
+                    && g_http_clients[i].detail_channel >= 0) {
+                    detail_ch = g_http_clients[i].detail_channel;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&g_http_lock);
+
+            if (detail_ch >= 0 && detail_ch < MAX_SLOTS) {
+                char json[SSE_BUF_SIZE];
+                build_ch_status_json(detail_ch, json, (int)sizeof(json));
+                sse_broadcast("ch_status", json);
+            }
+        }
+
+        /* Small sleep to avoid busy-spin (10ms) */
+        usleep(10000);
+    }
+
+    /* Cleanup: close all SSE clients */
+    pthread_mutex_lock(&g_http_lock);
+    for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+        if (g_http_clients[i].fd >= 0) {
+            close(g_http_clients[i].fd);
+            g_http_clients[i].fd = -1;
+        }
+    }
+    pthread_mutex_unlock(&g_http_lock);
+
+    close(listen_fd);
+    return NULL;
+}
+
 /* ── Usage ──────────────────────────────────────────────────────────── */
 
 static void usage(const char *prog) {
@@ -719,6 +1469,7 @@ static void usage(const char *prog) {
         "  -o DEV    ALSA audio output (default: hw:0,0)\n"
         "  -c N      Pre-configure channels 1-N with FM synth (default: 0)\n"
         "  -O PORT   OSC port (default: 9000)\n"
+        "  -W PORT   HTTP/SSE port for WaveUI (default: 8080, 0 to disable)\n"
         "  -P SIZE   Audio period size (default: 64)\n"
         "  -h        Help\n", prog);
 }
@@ -733,15 +1484,17 @@ int main(int argc, char *argv[]) {
     char audio_dev[64] = "hw:0,0";
     int pre_config = 0;
     int osc_port = DEFAULT_OSC_PORT;
+    int http_port = DEFAULT_HTTP_PORT;
     int period_size = DEFAULT_PERIOD;
 
     int opt;
-    while ((opt = getopt(argc, argv, "m:o:c:O:P:h")) != -1) {
+    while ((opt = getopt(argc, argv, "m:o:c:O:W:P:h")) != -1) {
         switch (opt) {
         case 'm': strncpy(midi_dev, optarg, sizeof(midi_dev) - 1); break;
         case 'o': strncpy(audio_dev, optarg, sizeof(audio_dev) - 1); break;
         case 'c': pre_config = atoi(optarg); break;
         case 'O': osc_port = atoi(optarg); break;
+        case 'W': http_port = atoi(optarg); break;
         case 'P': period_size = atoi(optarg); break;
         case 'h': /* fall through */
         default:
@@ -875,8 +1628,9 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
-    fprintf(stderr, "[miniwave] running [ALSA]%s — %d slots registered\n",
+    fprintf(stderr, "[miniwave] running [ALSA]%s%s — %d types registered\n",
             (bus && bus_slot >= 0) ? " [BUS]" : "",
+            (http_port > 0) ? " [HTTP]" : "",
             g_n_types);
 
     /* ── Start MIDI thread ─────────────────────────────────────── */
@@ -906,6 +1660,20 @@ int main(int argc, char *argv[]) {
     if (osc_port > 0) {
         if (pthread_create(&osc_tid, NULL, osc_thread_fn, &osc_ctx) != 0) {
             fprintf(stderr, "[miniwave] WARN: can't create OSC thread\n");
+        }
+    }
+
+    /* ── Start HTTP/SSE thread ────────────────────────────────── */
+
+    pthread_t http_tid = 0;
+    HttpThreadCtx http_ctx;
+    memset(&http_ctx, 0, sizeof(http_ctx));
+    http_ctx.port = http_port;
+
+    if (http_port > 0) {
+        http_load_html();
+        if (pthread_create(&http_tid, NULL, http_thread_fn, &http_ctx) != 0) {
+            fprintf(stderr, "[miniwave] WARN: can't create HTTP thread\n");
         }
     }
 
@@ -983,6 +1751,7 @@ int main(int argc, char *argv[]) {
 
     if (midi_tid) pthread_join(midi_tid, NULL);
     if (osc_tid)  pthread_join(osc_tid, NULL);
+    if (http_tid) pthread_join(http_tid, NULL);
 
 cleanup:
     /* Destroy all active slots */
@@ -1006,6 +1775,7 @@ cleanup:
     free(audio_buf);
     free(mix_buf);
     free(slot_buf);
+    free(g_html_content);
 
     fprintf(stderr, "[miniwave] done\n");
     return 0;

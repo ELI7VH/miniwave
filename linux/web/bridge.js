@@ -334,17 +334,22 @@ function updateDetailPolling() {
 
 // ── UDP OSC Socket ───────────────────────────────────────────────────
 
-const udp = dgram.createSocket('udp4')
+// Single UDP socket — bind to OSC_RECV_PORT so replies from miniwave come back here
+const udp = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
-udp.on('message', (buf) => {
+udp.on('message', (buf, rinfo) => {
   const decoded = oscDecode(buf)
   if (!decoded) return
   const json = oscToJson(decoded)
   if (json) broadcast(json)
 })
 
-udp.bind(OSC_RECV_PORT, () => {
-  console.log(`[bridge] OSC recv on UDP :${OSC_RECV_PORT}`)
+udp.on('error', (err) => {
+  console.error(`[bridge] UDP error: ${err.message}`)
+})
+
+udp.bind(OSC_RECV_PORT, '0.0.0.0', () => {
+  console.log(`[bridge] OSC on UDP :${OSC_RECV_PORT} → ${OSC_HOST}:${OSC_SEND_PORT}`)
 })
 
 function sendOsc(buf) {

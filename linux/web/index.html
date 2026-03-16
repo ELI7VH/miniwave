@@ -605,41 +605,51 @@ let channelStates = {};
 let selectedFamily = 0;
 let pressedKeys = new Set();
 
-// ── WebSocket ────────────────────────────────────────────────────
+// ── SSE + Fetch Transport ─────────────────────────────────────────
 
-let ws = null;
+let evtSource = null;
 let reconnectTimer = null;
 
 function connect() {
-  if (ws && ws.readyState <= 1) return;
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}`);
+  if (evtSource) return;
 
-  ws.onopen = () => {
+  evtSource = new EventSource('/events');
+
+  evtSource.onopen = () => {
     document.getElementById('status-dot').classList.add('connected');
-    send({ type: 'rack_types' });
-    send({ type: 'midi_devices' });
-    send({ type: 'rack_status' });
     if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
   };
 
-  ws.onclose = () => {
+  evtSource.onerror = () => {
     document.getElementById('status-dot').classList.remove('connected');
+    evtSource.close();
+    evtSource = null;
     if (!reconnectTimer) reconnectTimer = setInterval(connect, 2000);
   };
 
-  ws.onerror = () => {};
+  evtSource.addEventListener('rack_status', (e) => {
+    try { handleMessage(JSON.parse(e.data)); } catch (err) {}
+  });
 
-  ws.onmessage = (e) => {
-    try {
-      const data = JSON.parse(e.data);
-      handleMessage(data);
-    } catch (err) {}
-  };
+  evtSource.addEventListener('rack_types', (e) => {
+    try { handleMessage(JSON.parse(e.data)); } catch (err) {}
+  });
+
+  evtSource.addEventListener('midi_devices', (e) => {
+    try { handleMessage(JSON.parse(e.data)); } catch (err) {}
+  });
+
+  evtSource.addEventListener('ch_status', (e) => {
+    try { handleMessage(JSON.parse(e.data)); } catch (err) {}
+  });
 }
 
 function send(msg) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  fetch('/api', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(msg)
+  }).catch(() => {});
 }
 
 function handleMessage(data) {
@@ -885,6 +895,12 @@ function openDetail(ch) {
   selectedFamily = 0;
   channelStates[ch] = channelStates[ch] || null;
   send({ type: 'ch_status', channel: ch });
+  /* Tell server to push detail updates for this channel via SSE */
+  fetch('/api/detail', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel: ch })
+  }).catch(() => {});
 
   const detail = document.getElementById('detail');
   detail.classList.add('open');
@@ -894,6 +910,12 @@ function openDetail(ch) {
 
 function closeDetail() {
   send({ type: 'detail_close' });
+  /* Tell server to stop detail polling */
+  fetch('/api/detail', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel: -1 })
+  }).catch(() => {});
   activeDetail = -1;
   document.getElementById('detail').classList.remove('open');
   updateRack();
