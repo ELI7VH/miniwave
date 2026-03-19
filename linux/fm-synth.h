@@ -16,6 +16,8 @@
 #define FM_MAX_VOICES   16
 #define FM_LIMITER_THRESHOLD 0.7f
 #define FM_LIMITER_CEILING   0.95f
+#define FM_FADEIN_SAMPLES    48     /* ~1ms @ 48kHz — anti-click on note start */
+#define FM_FADEOUT_SAMPLES   96     /* ~2ms @ 48kHz — anti-click on voice kill/steal */
 
 /* ── Envelope state ─────────────────────────────────────────────────── */
 
@@ -36,6 +38,9 @@ typedef struct {
     float       release_level;  /* level at note-off */
     float       age;
     int         preset_idx;
+    int         sample_count;   /* samples since note-on (for fade-in) */
+    int         killing;        /* 1 = voice being killed with fade-out */
+    int         kill_pos;       /* current fade-out sample position */
 } FMVoice;
 
 /* ── Live parameter overrides ───────────────────────────────────────── */
@@ -62,25 +67,19 @@ static float fm_midi_to_freq(int note) {
     return 440.0f * powf(2.0f, (note - 69) / 12.0f);
 }
 
-/* Per-instance soft-knee limiter */
+/* Soft-knee limiter (matching yama-bruh worklet — instant, no envelope lag) */
 static inline float fm_limiter(FMSynth *s, float sample) {
+    (void)s;
     float absval = fabsf(sample);
 
-    if (absval > s->limiter_env)
-        s->limiter_env += (absval - s->limiter_env) * 0.01f;
-    else
-        s->limiter_env += (absval - s->limiter_env) * 0.0001f;
-
-    float gain = 1.0f;
-    if (s->limiter_env > FM_LIMITER_THRESHOLD) {
-        gain = FM_LIMITER_THRESHOLD / s->limiter_env;
+    if (absval > 0.5f) {
+        float over = absval - 0.5f;
+        float gain = 0.5f + over / (1.0f + over * 2.0f);
+        sample = (sample < 0.0f) ? -gain : gain;
     }
 
-    sample *= gain;
-
-    if (fabsf(sample) > FM_LIMITER_THRESHOLD) {
-        sample = tanhf(sample) * FM_LIMITER_CEILING;
-    }
+    if (sample > FM_LIMITER_CEILING)       sample = FM_LIMITER_CEILING;
+    else if (sample < -FM_LIMITER_CEILING) sample = -FM_LIMITER_CEILING;
 
     return sample;
 }
@@ -105,14 +104,15 @@ static void fm_note_on(FMSynth *s, int note, int vel) {
     float freq = fm_midi_to_freq(note);
     float velocity = vel / 127.0f;
 
-    /* Kill duplicate note */
+    /* Kill duplicate note — fade out instead of hard cut */
     for (int i = 0; i < FM_MAX_VOICES; i++) {
-        if (s->voices[i].active && s->voices[i].note == note) {
-            s->voices[i].active = 0;
+        if (s->voices[i].active && s->voices[i].note == note && !s->voices[i].killing) {
+            s->voices[i].killing = 1;
+            s->voices[i].kill_pos = 0;
         }
     }
 
-    /* Find free slot */
+    /* Find free slot (prefer already-dead, then fading-out) */
     int slot = -1;
     for (int i = 0; i < FM_MAX_VOICES; i++) {
         if (!s->voices[i].active) { slot = i; break; }
@@ -137,6 +137,9 @@ static void fm_note_on(FMSynth *s, int note, int vel) {
     v->velocity = velocity;
     v->env_state = FM_ENV_ATTACK;
     v->preset_idx = s->current_preset;
+    v->sample_count = 0;
+    v->killing = 0;
+    v->kill_pos = 0;
 }
 
 static void fm_note_off(FMSynth *s, int note) {
@@ -200,6 +203,15 @@ static void fm_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
 static void fm_synth_render(void *state, float *stereo_buf, int frames, int sample_rate) {
     FMSynth *s = (FMSynth *)state;
     const float dt = 1.0f / (float)sample_rate;
+
+    /* Count active voices for headroom scaling */
+    int active_count = 0;
+    for (int v = 0; v < FM_MAX_VOICES; v++) {
+        if (s->voices[v].active) active_count++;
+    }
+    /* Scale down as voices stack: 1 voice = full, 4+ voices = reduced */
+    float poly_gain = (active_count <= 1) ? 1.0f
+                    : 1.0f / sqrtf((float)active_count);
 
     for (int i = 0; i < frames; i++) {
         float mix = 0.0f;
@@ -285,6 +297,20 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
             vc->prev_mod = mod_out;
             float sample = sinf(vc->cp + mi * mod_out) * env * vc->velocity * 0.35f;
 
+            /* Anti-click fade-in (~1ms ramp on note start) */
+            if (vc->sample_count < FM_FADEIN_SAMPLES) {
+                sample *= (float)vc->sample_count / (float)FM_FADEIN_SAMPLES;
+            }
+            vc->sample_count++;
+
+            /* Anti-click fade-out (voice kill/steal) */
+            if (vc->killing) {
+                float fade = 1.0f - (float)vc->kill_pos / (float)FM_FADEOUT_SAMPLES;
+                if (fade <= 0.0f) { vc->active = 0; continue; }
+                sample *= fade;
+                vc->kill_pos++;
+            }
+
             /* NaN guard */
             if (!isfinite(sample) || !isfinite(vc->cp) || !isfinite(vc->mp)) {
                 vc->active = 0;
@@ -300,7 +326,7 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
             if (vc->mp > FM_TAU) vc->mp -= FM_TAU;
         }
 
-        mix *= s->volume;
+        mix *= s->volume * poly_gain;
         mix = fm_limiter(s, mix);
 
         stereo_buf[i * 2]     = mix;

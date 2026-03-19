@@ -36,6 +36,7 @@ typedef struct {
 typedef struct {
     RackSlot         slots[MAX_SLOTS];
     float            master_volume;
+    int              local_mute;    /* 1 = silence ALSA output, only send to bus */
     int              n_types;       /* number of registered instrument types */
     InstrumentType  *types;         /* array of registered types */
 } Rack;

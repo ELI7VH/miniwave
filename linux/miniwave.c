@@ -249,131 +249,215 @@ static void rack_clear_slot(int channel) {
     fprintf(stderr, "[miniwave] slot %d cleared\n", channel);
 }
 
-/* ── ALSA MIDI Auto-detect ──────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════
+ *  ALSA Sequencer MIDI (snd_seq)
+ *  Uses the sequencer API so multiple apps can share the same device.
+ *  Device addresses are "client:port" (e.g. "20:0") not "hw:1,0".
+ * ══════════════════════════════════════════════════════════════════════ */
 
-static int find_midi_device(char *out, size_t out_len, char *name_out, size_t name_len) {
-    int card = -1;
-    while (snd_card_next(&card) >= 0 && card >= 0) {
-        snd_ctl_t *ctl = NULL;
-        char cname[32];
-        snprintf(cname, sizeof(cname), "hw:%d", card);
-        if (snd_ctl_open(&ctl, cname, 0) < 0) continue;
+static snd_seq_t        *g_seq = NULL;
+static int               g_seq_port = -1;   /* our input port */
+static snd_seq_addr_t    g_seq_src = {0,0}; /* currently subscribed source */
+static int               g_seq_connected = 0;
 
-        int device = -1;
-        while (snd_ctl_rawmidi_next_device(ctl, &device) >= 0 && device >= 0) {
-            snd_rawmidi_info_t *info;
-            snd_rawmidi_info_alloca(&info);
-            snd_rawmidi_info_set_device(info, (unsigned int)device);
-            snd_rawmidi_info_set_subdevice(info, 0);
-            snd_rawmidi_info_set_stream(info, SND_RAWMIDI_STREAM_INPUT);
-
-            if (snd_ctl_rawmidi_info(ctl, info) >= 0) {
-                const char *devname = snd_rawmidi_info_get_name(info);
-                if (devname && strstr(devname, "Midi Through") == NULL) {
-                    snprintf(out, out_len, "hw:%d,%d", card, device);
-                    if (name_out) snprintf(name_out, name_len, "%s", devname);
-                    snd_ctl_close(ctl);
-                    fprintf(stderr, "[miniwave] MIDI: %s (%s)\n", out, devname);
-                    return 0;
-                }
-            }
-        }
-        snd_ctl_close(ctl);
+/* Open the sequencer client (once at startup) */
+static int seq_init(void) {
+    int err = snd_seq_open(&g_seq, "default", SND_SEQ_OPEN_INPUT, SND_SEQ_NONBLOCK);
+    if (err < 0) {
+        fprintf(stderr, "[miniwave] can't open ALSA sequencer: %s\n", snd_strerror(err));
+        return -1;
     }
-    return -1;
+    snd_seq_set_client_name(g_seq, "miniwave");
+
+    g_seq_port = snd_seq_create_simple_port(g_seq, "MIDI In",
+        SND_SEQ_PORT_CAP_WRITE | SND_SEQ_PORT_CAP_SUBS_WRITE,
+        SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
+    if (g_seq_port < 0) {
+        fprintf(stderr, "[miniwave] can't create seq port: %s\n", snd_strerror(g_seq_port));
+        snd_seq_close(g_seq);
+        g_seq = NULL;
+        return -1;
+    }
+
+    fprintf(stderr, "[miniwave] ALSA seq client %d:%d (miniwave:MIDI In)\n",
+            snd_seq_client_id(g_seq), g_seq_port);
+    return 0;
 }
 
-/* List all available MIDI devices. Returns count. */
+/* Subscribe to a source port ("client:port" string) */
+static int seq_connect(const char *addr_str) {
+    if (!g_seq) return -1;
+
+    /* Disconnect old */
+    if (g_seq_connected) {
+        snd_seq_disconnect_from(g_seq, g_seq_port, g_seq_src.client, g_seq_src.port);
+        g_seq_connected = 0;
+        g_midi_device_name[0] = '\0';
+    }
+
+    /* Parse "client:port" */
+    snd_seq_addr_t addr;
+    int err = snd_seq_parse_address(g_seq, &addr, addr_str);
+    if (err < 0) {
+        fprintf(stderr, "[miniwave] bad MIDI address '%s': %s\n",
+                addr_str, snd_strerror(err));
+        return -1;
+    }
+
+    err = snd_seq_connect_from(g_seq, g_seq_port, addr.client, addr.port);
+    if (err < 0) {
+        fprintf(stderr, "[miniwave] can't subscribe to %s: %s\n",
+                addr_str, snd_strerror(err));
+        return -1;
+    }
+
+    g_seq_src = addr;
+    g_seq_connected = 1;
+
+    /* Get client name for display */
+    snd_seq_client_info_t *cinfo;
+    snd_seq_client_info_alloca(&cinfo);
+    if (snd_seq_get_any_client_info(g_seq, addr.client, cinfo) >= 0) {
+        snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%s (%d:%d)",
+                 snd_seq_client_info_get_name(cinfo), addr.client, addr.port);
+    } else {
+        snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%d:%d",
+                 addr.client, addr.port);
+    }
+
+    fprintf(stderr, "[miniwave] MIDI connected: %s\n", g_midi_device_name);
+    return 0;
+}
+
+/* Disconnect current source */
+static void seq_disconnect(void) {
+    if (!g_seq || !g_seq_connected) return;
+    snd_seq_disconnect_from(g_seq, g_seq_port, g_seq_src.client, g_seq_src.port);
+    g_seq_connected = 0;
+    g_midi_device_name[0] = '\0';
+    fprintf(stderr, "[miniwave] MIDI disconnected\n");
+}
+
+/* List all sequencer input ports. Returns count. */
 static int list_midi_devices(char devices[][64], char names[][128], int max_devices) {
+    if (!g_seq) return 0;
     int count = 0;
-    int card = -1;
-    while (snd_card_next(&card) >= 0 && card >= 0 && count < max_devices) {
-        snd_ctl_t *ctl = NULL;
-        char cname[32];
-        snprintf(cname, sizeof(cname), "hw:%d", card);
-        if (snd_ctl_open(&ctl, cname, 0) < 0) continue;
 
-        int device = -1;
-        while (snd_ctl_rawmidi_next_device(ctl, &device) >= 0 && device >= 0
-               && count < max_devices) {
-            snd_rawmidi_info_t *info;
-            snd_rawmidi_info_alloca(&info);
-            snd_rawmidi_info_set_device(info, (unsigned int)device);
-            snd_rawmidi_info_set_subdevice(info, 0);
-            snd_rawmidi_info_set_stream(info, SND_RAWMIDI_STREAM_INPUT);
+    snd_seq_client_info_t *cinfo;
+    snd_seq_port_info_t *pinfo;
+    snd_seq_client_info_alloca(&cinfo);
+    snd_seq_port_info_alloca(&pinfo);
 
-            if (snd_ctl_rawmidi_info(ctl, info) >= 0) {
-                const char *devname = snd_rawmidi_info_get_name(info);
-                snprintf(devices[count], 64, "hw:%d,%d", card, device);
-                snprintf(names[count], 128, "%s", devname ? devname : "Unknown");
-                count++;
-            }
+    snd_seq_client_info_set_client(cinfo, -1);
+    while (snd_seq_query_next_client(g_seq, cinfo) >= 0 && count < max_devices) {
+        int client = snd_seq_client_info_get_client(cinfo);
+        const char *cname = snd_seq_client_info_get_name(cinfo);
+
+        /* Skip ourselves and the System client */
+        if (client == snd_seq_client_id(g_seq)) continue;
+        if (client == 0) continue;
+
+        snd_seq_port_info_set_client(pinfo, client);
+        snd_seq_port_info_set_port(pinfo, -1);
+        while (snd_seq_query_next_port(g_seq, pinfo) >= 0 && count < max_devices) {
+            unsigned int caps = snd_seq_port_info_get_capability(pinfo);
+            /* We want ports that can output (i.e. we can read from them) */
+            if (!(caps & SND_SEQ_PORT_CAP_READ)) continue;
+            if (!(caps & SND_SEQ_PORT_CAP_SUBS_READ)) continue;
+
+            int port = snd_seq_port_info_get_port(pinfo);
+            const char *pname = snd_seq_port_info_get_name(pinfo);
+
+            /* Skip Midi Through */
+            if (cname && strstr(cname, "Midi Through")) continue;
+
+            snprintf(devices[count], 64, "%d:%d", client, port);
+            snprintf(names[count], 128, "%s — %s",
+                     cname ? cname : "?", pname ? pname : "?");
+            count++;
         }
-        snd_ctl_close(ctl);
     }
     return count;
 }
 
-/* ── MIDI Thread ────────────────────────────────────────────────────── */
+/* Dispatch a single sequencer event to the rack */
+static inline void seq_dispatch(snd_seq_event_t *ev) {
+    int ch = ev->data.note.channel; /* works for note, control, pgmchange */
+    if (ch < 0 || ch >= MAX_SLOTS) return;
+
+    RackSlot *slot = &g_rack.slots[ch];
+    if (!slot->active || !slot->state) return;
+    InstrumentType *itype = g_type_registry[slot->type_idx];
+
+    switch (ev->type) {
+    case SND_SEQ_EVENT_NOTEON:
+        itype->midi(slot->state,
+                    (uint8_t)(0x90 | ch),
+                    (uint8_t)ev->data.note.note,
+                    (uint8_t)ev->data.note.velocity);
+        break;
+    case SND_SEQ_EVENT_NOTEOFF:
+        itype->midi(slot->state,
+                    (uint8_t)(0x80 | ch),
+                    (uint8_t)ev->data.note.note,
+                    0);
+        break;
+    case SND_SEQ_EVENT_CONTROLLER:
+        itype->midi(slot->state,
+                    (uint8_t)(0xB0 | ch),
+                    (uint8_t)ev->data.control.param,
+                    (uint8_t)ev->data.control.value);
+        break;
+    case SND_SEQ_EVENT_PGMCHANGE:
+        itype->midi(slot->state,
+                    (uint8_t)(0xC0 | ch),
+                    (uint8_t)ev->data.control.value,
+                    0);
+        break;
+    case SND_SEQ_EVENT_PITCHBEND: {
+        /* snd_seq pitch bend: -8192..8191 → 14-bit 0..16383 */
+        int val = ev->data.control.value + 8192;
+        if (val < 0) val = 0;
+        if (val > 16383) val = 16383;
+        itype->midi(slot->state,
+                    (uint8_t)(0xE0 | ch),
+                    (uint8_t)(val & 0x7F),
+                    (uint8_t)((val >> 7) & 0x7F));
+        break;
+    }
+    case SND_SEQ_EVENT_CHANPRESS:
+        itype->midi(slot->state,
+                    (uint8_t)(0xD0 | ch),
+                    (uint8_t)ev->data.control.value,
+                    0);
+        break;
+    default:
+        break;
+    }
+}
+
+/* ── MIDI Thread (sequencer event loop) ────────────────────────────── */
 
 typedef struct {
-    snd_rawmidi_t *midi_in;
+    int dummy; /* seq handle is global */
 } MidiThreadCtx;
 
 static void *midi_thread_fn(void *arg) {
-    MidiThreadCtx *ctx = (MidiThreadCtx *)arg;
-    uint8_t midi_byte = 0;
-    uint8_t midi_msg[3] = {0};
-    int midi_pos = 0;
-    int midi_expected = 0;
-    uint8_t midi_running = 0;
+    (void)arg;
+    if (!g_seq) return NULL;
 
-    int npfds = snd_rawmidi_poll_descriptors_count(ctx->midi_in);
+    int npfds = snd_seq_poll_descriptors_count(g_seq, POLLIN);
     struct pollfd *pfds = calloc((size_t)npfds, sizeof(struct pollfd));
     if (!pfds) return NULL;
-    snd_rawmidi_poll_descriptors(ctx->midi_in, pfds, (unsigned int)npfds);
+    snd_seq_poll_descriptors(g_seq, pfds, (unsigned int)npfds, POLLIN);
 
     while (!g_quit) {
         int ret = poll(pfds, (nfds_t)npfds, 50);
         if (ret <= 0) continue;
 
-        for (;;) {
-            ssize_t r = snd_rawmidi_read(ctx->midi_in, &midi_byte, 1);
-            if (r <= 0) break;
-
-            /* Skip realtime */
-            if (midi_byte >= 0xF8) continue;
-            /* Skip system common */
-            if (midi_byte >= 0xF0) { midi_pos = 0; continue; }
-
-            if (midi_byte & 0x80) {
-                midi_msg[0] = midi_byte;
-                midi_running = midi_byte;
-                midi_pos = 1;
-                uint8_t type = midi_byte & 0xF0;
-                midi_expected = (type == 0xC0 || type == 0xD0) ? 2 : 3;
-            } else if (midi_running) {
-                if (midi_pos == 0) {
-                    midi_msg[0] = midi_running;
-                    midi_pos = 1;
-                    uint8_t type = midi_running & 0xF0;
-                    midi_expected = (type == 0xC0 || type == 0xD0) ? 2 : 3;
-                }
-                midi_msg[midi_pos++] = midi_byte;
-            }
-
-            if (midi_pos >= midi_expected && midi_expected > 0) {
-                /* Route by channel */
-                int channel = midi_msg[0] & 0x0F;
-                RackSlot *slot = &g_rack.slots[channel];
-                if (slot->active && slot->state) {
-                    InstrumentType *itype = g_type_registry[slot->type_idx];
-                    itype->midi(slot->state, midi_msg[0],
-                                midi_expected >= 2 ? midi_msg[1] : 0,
-                                midi_expected >= 3 ? midi_msg[2] : 0);
-                }
-                midi_pos = 0;
-            }
+        snd_seq_event_t *ev = NULL;
+        while (snd_seq_event_input(g_seq, &ev) >= 0 && ev) {
+            seq_dispatch(ev);
         }
     }
 
@@ -385,8 +469,6 @@ static void *midi_thread_fn(void *arg) {
 
 typedef struct {
     int          port;
-    snd_rawmidi_t **midi_in_ptr; /* pointer so we can swap devices */
-    char         *midi_dev;      /* current MIDI device string */
 } OscThreadCtx;
 
 static void *osc_thread_fn(void *arg) {
@@ -525,6 +607,12 @@ static void *osc_thread_fn(void *arg) {
             if (vol > 1.0f) vol = 1.0f;
             g_rack.master_volume = vol;
         }
+        /* /rack/local_mute  i — mute ALSA output, bus-only mode */
+        else if (strcmp(osc_addr, "/rack/local_mute") == 0 && ai >= 1) {
+            g_rack.local_mute = arg_i[0] ? 1 : 0;
+            fprintf(stderr, "[miniwave] local mute: %s (bus-only)\n",
+                    g_rack.local_mute ? "ON" : "OFF");
+        }
         /* /rack/status */
         else if (strcmp(osc_addr, "/rack/status") == 0) {
             uint8_t reply[OSC_BUF_SIZE];
@@ -652,27 +740,13 @@ static void *osc_thread_fn(void *arg) {
             sendto(sock, reply, (size_t)rpos, 0,
                    (struct sockaddr *)&sender, sender_len);
         }
-        /* /midi/device  s  — switch MIDI input */
+        /* /midi/device  s  — subscribe to MIDI source (client:port) */
         else if (strcmp(osc_addr, "/midi/device") == 0 && asi >= 1) {
-            fprintf(stderr, "[miniwave] OSC MIDI device switch to: %s\n", arg_s[0]);
-            /* Close old */
-            if (ctx->midi_in_ptr && *ctx->midi_in_ptr) {
-                snd_rawmidi_close(*ctx->midi_in_ptr);
-                *ctx->midi_in_ptr = NULL;
-            }
-            /* Open new */
-            snd_rawmidi_t *new_midi = NULL;
-            int err = snd_rawmidi_open(&new_midi, NULL, arg_s[0],
-                                       SND_RAWMIDI_NONBLOCK);
-            if (err < 0) {
-                fprintf(stderr, "[miniwave] can't open MIDI %s: %s\n",
-                        arg_s[0], snd_strerror(err));
-            } else {
-                if (ctx->midi_in_ptr) *ctx->midi_in_ptr = new_midi;
-                snprintf(ctx->midi_dev, 64, "%s", arg_s[0]);
-                snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%s", arg_s[0]);
-                fprintf(stderr, "[miniwave] MIDI switched to %s\n", arg_s[0]);
-            }
+            seq_connect(arg_s[0]);
+        }
+        /* /midi/disconnect — unsubscribe from current MIDI source */
+        else if (strcmp(osc_addr, "/midi/disconnect") == 0) {
+            seq_disconnect();
         }
         /* /ch/N/... — per-instrument OSC */
         else if (strncmp(osc_addr, "/ch/", 4) == 0) {
@@ -1146,6 +1220,14 @@ static void http_handle_api(int fd, const char *body) {
         g_rack.master_volume = val;
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
     }
+    else if (strcmp(type_str, "local_mute") == 0) {
+        int val = 0;
+        json_get_int(body, "value", &val);
+        g_rack.local_mute = val ? 1 : 0;
+        fprintf(stderr, "[miniwave] local mute: %s (bus-only)\n",
+                g_rack.local_mute ? "ON" : "OFF");
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+    }
     else if (strcmp(type_str, "rack_status") == 0) {
         rlen = build_rack_status_json(resp, (int)sizeof(resp));
     }
@@ -1228,8 +1310,16 @@ static void http_handle_api(int fd, const char *body) {
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
     }
     else if (strcmp(type_str, "midi_device") == 0) {
-        /* MIDI device switch not implemented via HTTP — use OSC */
-        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true,\"note\":\"use OSC for MIDI switch\"}");
+        char dev[64] = "";
+        json_get_string(body, "value", dev, sizeof(dev));
+        if (dev[0]) {
+            int err2 = seq_connect(dev);
+            rlen = snprintf(resp, sizeof(resp), err2 == 0
+                ? "{\"ok\":true}" : "{\"error\":\"can't connect\"}");
+        } else {
+            seq_disconnect();
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
     }
     else {
         rlen = snprintf(resp, sizeof(resp), "{\"error\":\"unknown type: %s\"}", type_str);
@@ -1495,8 +1585,8 @@ static void usage(const char *prog) {
     fprintf(stderr,
         "miniwave — modular rack host for waveOS\n"
         "Usage: %s [options]\n"
-        "  -m DEV    ALSA MIDI input (default: auto-detect)\n"
-        "  -o DEV    ALSA audio output (default: hw:0,0)\n"
+        "  -m C:P    ALSA seq MIDI source client:port (e.g. 20:0)\n"
+        "  -o DEV    ALSA audio output (default: default)\n"
         "  -c N      Pre-configure channels 1-N with FM synth (default: 0)\n"
         "  -O PORT   OSC port (default: 9000)\n"
         "  -W PORT   HTTP/SSE port for WaveUI (default: 8080, 0 to disable)\n"
@@ -1511,7 +1601,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, sighandler);
 
     char midi_dev[64] = "";
-    char audio_dev[64] = "hw:0,0";
+    char audio_dev[64] = "default";
     int pre_config = 0;
     int osc_port = DEFAULT_OSC_PORT;
     int http_port = DEFAULT_HTTP_PORT;
@@ -1545,27 +1635,15 @@ int main(int argc, char *argv[]) {
         rack_set_slot(i, "fm-synth");
     }
 
-    /* ── ALSA MIDI ─────────────────────────────────────────────── */
+    /* ── ALSA Sequencer MIDI ─────────────────────────────────────── */
+    /* Always open the sequencer client so we can list devices and
+     * subscribe at runtime.  If -m is given, connect immediately. */
 
-    if (midi_dev[0] == '\0') {
-        char detected_name[128] = "";
-        if (find_midi_device(midi_dev, sizeof(midi_dev),
-                             detected_name, sizeof(detected_name)) == 0) {
-            snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%s", detected_name);
+    if (seq_init() == 0) {
+        if (midi_dev[0] != '\0') {
+            seq_connect(midi_dev);
         } else {
-            fprintf(stderr, "[miniwave] WARN: no MIDI device found\n");
-        }
-    } else {
-        snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%s", midi_dev);
-    }
-
-    snd_rawmidi_t *midi_in = NULL;
-    if (midi_dev[0] != '\0') {
-        int err = snd_rawmidi_open(&midi_in, NULL, midi_dev, SND_RAWMIDI_NONBLOCK);
-        if (err < 0) {
-            fprintf(stderr, "[miniwave] WARN: can't open MIDI %s: %s\n",
-                    midi_dev, snd_strerror(err));
-            midi_in = NULL;
+            fprintf(stderr, "[miniwave] MIDI: ready (use -m client:port or OSC /midi/device)\n");
         }
     }
 
@@ -1576,7 +1654,7 @@ int main(int argc, char *argv[]) {
     if (err < 0) {
         fprintf(stderr, "[miniwave] ERROR: can't open audio %s: %s\n",
                 audio_dev, snd_strerror(err));
-        if (midi_in) snd_rawmidi_close(midi_in);
+        if (g_seq) { snd_seq_close(g_seq); g_seq = NULL; }
         return 1;
     }
 
@@ -1598,7 +1676,7 @@ int main(int argc, char *argv[]) {
         if (err < 0) {
             fprintf(stderr, "[miniwave] ERROR: hw_params: %s\n", snd_strerror(err));
             snd_pcm_close(pcm);
-            if (midi_in) snd_rawmidi_close(midi_in);
+            if (g_seq) { snd_seq_close(g_seq); g_seq = NULL; }
             return 1;
         }
 
@@ -1666,16 +1744,13 @@ int main(int argc, char *argv[]) {
     /* ── Start MIDI thread ─────────────────────────────────────── */
 
     pthread_t midi_tid = 0;
-    MidiThreadCtx midi_ctx;
-    memset(&midi_ctx, 0, sizeof(midi_ctx));
-    midi_ctx.midi_in = midi_in;
 
-    if (midi_in) {
-        if (pthread_create(&midi_tid, NULL, midi_thread_fn, &midi_ctx) != 0) {
+    if (g_seq) {
+        if (pthread_create(&midi_tid, NULL, midi_thread_fn, NULL) != 0) {
             fprintf(stderr, "[miniwave] ERROR: can't create MIDI thread\n");
             goto cleanup;
         }
-        fprintf(stderr, "[miniwave] MIDI thread started (%s)\n", midi_dev);
+        fprintf(stderr, "[miniwave] MIDI seq thread started\n");
     }
 
     /* ── Start OSC thread ──────────────────────────────────────── */
@@ -1684,8 +1759,6 @@ int main(int argc, char *argv[]) {
     OscThreadCtx osc_ctx;
     memset(&osc_ctx, 0, sizeof(osc_ctx));
     osc_ctx.port = osc_port;
-    osc_ctx.midi_in_ptr = &midi_in;
-    osc_ctx.midi_dev = midi_dev;
 
     if (osc_port > 0) {
         if (pthread_create(&osc_tid, NULL, osc_thread_fn, &osc_ctx) != 0) {
@@ -1756,12 +1829,16 @@ int main(int argc, char *argv[]) {
             bus_write(bus, bus_slot, mix_buf, period_size);
         }
 
-        /* Convert to S16 for ALSA */
-        for (int j = 0; j < period_size * CHANNELS; j++) {
-            float s = mix_buf[j];
-            if (s > 1.0f) s = 1.0f;
-            if (s < -1.0f) s = -1.0f;
-            audio_buf[j] = (int16_t)(s * 32000.0f);
+        /* Convert to S16 for ALSA (silence if local_mute — bus-only mode) */
+        if (g_rack.local_mute) {
+            memset(audio_buf, 0, (size_t)(period_size * CHANNELS) * sizeof(int16_t));
+        } else {
+            for (int j = 0; j < period_size * CHANNELS; j++) {
+                float s = mix_buf[j];
+                if (s > 1.0f) s = 1.0f;
+                if (s < -1.0f) s = -1.0f;
+                audio_buf[j] = (int16_t)(s * 32000.0f);
+            }
         }
 
         /* Write to ALSA */
@@ -1800,7 +1877,11 @@ cleanup:
         memset(bus->slots[bus_slot].name, 0, 32);
         munmap(bus, sizeof(WaveosBus));
     }
-    if (midi_in) snd_rawmidi_close(midi_in);
+    if (g_seq) {
+        if (g_seq_connected) seq_disconnect();
+        snd_seq_close(g_seq);
+        g_seq = NULL;
+    }
     if (pcm) snd_pcm_close(pcm);
     free(audio_buf);
     free(mix_buf);
