@@ -74,6 +74,7 @@ static int osc_write_string(uint8_t *buf, int max, const char *str) {
 #include "instruments.h"
 #include "fm-synth.h"
 #include "ym2413.h"
+#include "sub-synth.h"
 
 /* ── Constants ──────────────────────────────────────────────────────── */
 
@@ -196,6 +197,7 @@ static void rack_init(void) {
     /* Register built-in types */
     rack_register_type(&fm_synth_type);
     rack_register_type(&ym2413_type);
+    rack_register_type(&sub_synth_type);
 }
 
 static int rack_set_slot(int channel, const char *type_name) {
