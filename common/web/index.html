@@ -51,6 +51,9 @@ html, body {
   font-weight: bold;
   letter-spacing: 2px;
   color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #topbar .logo span { color: var(--dim); font-weight: normal; font-size: 11px; }
@@ -63,16 +66,27 @@ html, body {
 
 .midi-section label { color: var(--dim); font-size: 11px; text-transform: uppercase; }
 
-#midi-select {
-  background: var(--card);
+#midi-select, .sleek-select {
+  background: transparent;
   color: var(--text);
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-  border-radius: 4px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 18px 4px 4px;
   font-family: inherit;
   font-size: 12px;
   min-width: 150px;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23666'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  cursor: pointer;
+  transition: border-color 0.15s;
 }
+#midi-select:hover, .sleek-select:hover { border-color: var(--accent); }
+#midi-select:focus, .sleek-select:focus { outline: none; border-color: var(--accent); }
+#midi-select option, .sleek-select option { background: var(--panel); color: var(--text); }
 
 .master-section {
   display: flex;
@@ -117,7 +131,7 @@ html, body {
 
 #main {
   display: flex;
-  height: calc(100% - 48px);
+  height: calc(100% - 48px - 38px); /* topbar + footer */
   position: relative;
 }
 
@@ -268,25 +282,66 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--card);
+  gap: 8px;
 }
 
-.detail-header h2 { font-size: 14px; font-weight: bold; }
-.detail-header h2 span { color: var(--accent); }
+.detail-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 
-.detail-close {
+.detail-nav-btn {
   background: none;
-  border: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
   color: var(--dim);
-  font-size: 20px;
+  font-size: 14px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 2px 8px;
   font-family: inherit;
+  line-height: 1;
+  transition: all 0.15s;
 }
 
-.detail-close:hover { color: var(--text); }
+.detail-nav-btn:hover { color: var(--text); border-color: var(--text); }
+
+.detail-ch-label {
+  font-size: 11px;
+  font-weight: bold;
+  color: var(--dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.detail-type-select {
+  background: transparent;
+  color: var(--accent);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 2px 4px 2px 0;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23666'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 2px center;
+  padding-right: 14px;
+  min-width: 80px;
+  transition: border-color 0.15s;
+}
+
+.detail-type-select:hover { border-color: var(--accent); }
+.detail-type-select:focus { outline: none; border-color: var(--accent); }
+.detail-type-select option { background: var(--panel); color: var(--text); }
 
 .detail-body { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
 
@@ -497,21 +552,54 @@ html, body {
 .detail-volume input { flex: 1; accent-color: var(--good); }
 .detail-volume .val { font-size: 12px; min-width: 32px; text-align: right; }
 
-/* ── WaveUI Badge ────────────────────────────────────────────────── */
+/* ── Status Footer ───────────────────────────────────────────────── */
 
-#badge {
+#status-footer {
   position: fixed;
-  bottom: 8px;
-  right: 12px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 4px 12px;
   font-size: 10px;
   color: var(--dim);
   z-index: 100;
-  pointer-events: auto;
-  cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-#badge a { color: var(--dim); text-decoration: none; }
-#badge a:hover { color: var(--text); }
+.footer-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  white-space: nowrap;
+}
+
+.footer-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.footer-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #333;
+  flex-shrink: 0;
+}
+
+.footer-dot.on { background: var(--good); box-shadow: 0 0 4px var(--good); }
+.footer-dot.warn { background: var(--solo); }
+.footer-dot.off { background: #333; }
+
+.footer-label { color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.footer-val { color: var(--text); }
+
+#status-footer a { color: var(--dim); text-decoration: none; }
+#status-footer a:hover { color: var(--text); }
 
 /* ── Responsive ──────────────────────────────────────────────────── */
 
@@ -566,7 +654,45 @@ html, body {
   <div id="detail"></div>
 </div>
 
-<div id="badge"><a href="/osc-spec" target="_blank">WaveUI</a> &middot; OSC spec at /osc-spec</div>
+<div id="status-footer">
+  <div class="footer-row">
+    <div class="footer-item">
+      <span class="footer-dot" id="f-audio-dot"></span>
+      <span class="footer-label">Audio</span>
+      <span class="footer-val" id="f-audio-val">—</span>
+    </div>
+    <div class="footer-item">
+      <span class="footer-dot" id="f-midi-dot"></span>
+      <span class="footer-label">MIDI</span>
+      <span class="footer-val" id="f-midi-val">—</span>
+    </div>
+    <div class="footer-item">
+      <span class="footer-dot" id="f-bus-dot"></span>
+      <span class="footer-label">Bus</span>
+      <span class="footer-val" id="f-bus-val">—</span>
+    </div>
+  </div>
+  <div class="footer-row">
+    <div class="footer-item">
+      <span class="footer-dot" id="f-osc-dot"></span>
+      <span class="footer-label">OSC</span>
+      <span class="footer-val" id="f-osc-val">—</span>
+    </div>
+    <div class="footer-item">
+      <span class="footer-dot" id="f-mcast-dot"></span>
+      <span class="footer-label">Multicast</span>
+      <span class="footer-val" id="f-mcast-val">—</span>
+    </div>
+    <div class="footer-item">
+      <span class="footer-dot" id="f-sse-dot"></span>
+      <span class="footer-label">SSE</span>
+      <span class="footer-val" id="f-sse-val">—</span>
+    </div>
+    <div class="footer-item" style="margin-left:auto;">
+      <a href="/osc-map" target="_blank">osc-map</a>
+    </div>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -692,15 +818,33 @@ function send(msg) {
 
 function handleMessage(data) {
   switch (data.type) {
-    case 'rack_status':
+    case 'rack_status': {
+      /* Detect instrument change on active detail channel */
+      const prevType = (activeDetail >= 0 && rackState.slots[activeDetail])
+                       ? rackState.slots[activeDetail].type : null;
       rackState.slots = data.slots;
       rackState.master_volume = data.master_volume;
       rackState.midi_device = data.midi_device;
       rackState.audio_backend = data.audio_backend;
       rackState.local_mute = data.local_mute;
+      rackState.osc_port = data.osc_port;
+      rackState.mcast_active = data.mcast_active;
+      rackState.mcast_group = data.mcast_group;
+      rackState.bus_active = data.bus_active;
+      rackState.bus_slot = data.bus_slot;
+      rackState.sse_clients = data.sse_clients;
       updateRack();
       updateTopBar();
+      /* Re-render detail pane if instrument type changed */
+      if (activeDetail >= 0) {
+        const newType = rackState.slots[activeDetail] ? rackState.slots[activeDetail].type : null;
+        if (newType !== prevType) {
+          send({ type: 'ch_status', channel: activeDetail });
+          renderDetailPane();
+        }
+      }
       break;
+    }
     case 'rack_types':
       instrumentTypes = data.types;
       updateTypeDropdowns();
@@ -913,6 +1057,64 @@ function updateTopBar() {
   if (document.activeElement !== cb) {
     cb.checked = !!rackState.local_mute;
   }
+
+  updateFooter();
+}
+
+function updateFooter() {
+  const r = rackState;
+
+  // Audio
+  const audioDot = document.getElementById('f-audio-dot');
+  const audioVal = document.getElementById('f-audio-val');
+  if (audioDot && audioVal) {
+    audioDot.className = 'footer-dot on';
+    audioVal.textContent = r.audio_backend || '—';
+  }
+
+  // MIDI
+  const midiDot = document.getElementById('f-midi-dot');
+  const midiVal = document.getElementById('f-midi-val');
+  if (midiDot && midiVal) {
+    const hasMidi = r.midi_device && r.midi_device.length > 0;
+    midiDot.className = 'footer-dot' + (hasMidi ? ' on' : ' off');
+    midiVal.textContent = hasMidi ? r.midi_device : 'none';
+  }
+
+  // Bus
+  const busDot = document.getElementById('f-bus-dot');
+  const busVal = document.getElementById('f-bus-val');
+  if (busDot && busVal) {
+    const hasBus = r.bus_active === 1;
+    busDot.className = 'footer-dot' + (hasBus ? ' on' : ' off');
+    busVal.textContent = hasBus ? 'slot ' + r.bus_slot : 'none';
+  }
+
+  // OSC
+  const oscDot = document.getElementById('f-osc-dot');
+  const oscVal = document.getElementById('f-osc-val');
+  if (oscDot && oscVal) {
+    oscDot.className = 'footer-dot on';
+    oscVal.textContent = ':' + (r.osc_port || 9000);
+  }
+
+  // Multicast
+  const mcastDot = document.getElementById('f-mcast-dot');
+  const mcastVal = document.getElementById('f-mcast-val');
+  if (mcastDot && mcastVal) {
+    const hasMcast = r.mcast_active === 1;
+    mcastDot.className = 'footer-dot' + (hasMcast ? ' on' : ' off');
+    mcastVal.textContent = hasMcast ? (r.mcast_group || '—') : 'off';
+  }
+
+  // SSE
+  const sseDot = document.getElementById('f-sse-dot');
+  const sseVal = document.getElementById('f-sse-val');
+  if (sseDot && sseVal) {
+    const n = r.sse_clients || 0;
+    sseDot.className = 'footer-dot' + (n > 0 ? ' on' : ' off');
+    sseVal.textContent = n + ' client' + (n !== 1 ? 's' : '');
+  }
 }
 
 function updateMidiDropdown() {
@@ -1000,17 +1202,55 @@ function renderDetailPane() {
   const slot = rackState.slots[ch];
   const detail = document.getElementById('detail');
 
-  const typeName = slot.active ? (slot.type || 'Unknown') : 'Empty';
+  /* Build instrument type <option> list */
+  let typeOpts = '<option value="">— none —</option>';
+  for (const t of instrumentTypes) {
+    const sel = (slot.active && slot.type === t) ? ' selected' : '';
+    typeOpts += `<option value="${t}"${sel}>${t}</option>`;
+  }
+
+  /* Build MIDI source <option> list */
+  let midiOpts = '<option value="">No Device</option>';
+  for (const d of midiDevices) {
+    const sel = (rackState.midi_device && rackState.midi_device.includes(d.id)) ? ' selected' : '';
+    midiOpts += `<option value="${d.id}"${sel}>${d.name}</option>`;
+  }
 
   detail.innerHTML = `
     <div class="detail-header">
-      <h2>CH ${ch + 1} — <span>${typeName}</span></h2>
-      <button class="detail-close" id="detail-close">&times;</button>
+      <div class="detail-nav">
+        <button class="detail-nav-btn" id="detail-prev" title="Previous channel">&#9666;</button>
+        <span class="detail-ch-label">CH ${ch + 1}</span>
+        <button class="detail-nav-btn" id="detail-next" title="Next channel">&#9656;</button>
+      </div>
+      <select class="detail-type-select" id="detail-type-sel">${typeOpts}</select>
     </div>
     <div class="detail-body" id="detail-body"></div>
+    <div class="detail-footer" style="padding:10px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;margin-top:auto;">
+      <span style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">MIDI</span>
+      <select class="sleek-select" id="detail-midi-sel" style="flex:1;min-width:0;font-size:11px;">${midiOpts}</select>
+    </div>
   `;
 
-  document.getElementById('detail-close').addEventListener('click', closeDetail);
+  document.getElementById('detail-prev').addEventListener('click', () => {
+    openDetail((activeDetail + 15) % 16);
+  });
+  document.getElementById('detail-next').addEventListener('click', () => {
+    openDetail((activeDetail + 1) % 16);
+  });
+  document.getElementById('detail-type-sel').addEventListener('change', (e) => {
+    const val = e.target.value;
+    if (val === '') {
+      send({ type: 'slot_clear', channel: ch });
+    } else {
+      send({ type: 'slot_set', channel: ch, instrument: val });
+    }
+    /* Re-render after server processes the change */
+    setTimeout(() => { send({ type: 'ch_status', channel: ch }); renderDetailPane(); }, 100);
+  });
+  document.getElementById('detail-midi-sel').addEventListener('change', (e) => {
+    send({ type: 'midi_device', value: e.target.value });
+  });
 
   if (slot.active && slot.type === 'fm-synth') {
     renderFMSynth(ch);
@@ -1018,6 +1258,8 @@ function renderDetailPane() {
     renderSubSynth(ch);
   } else if (slot.active && slot.type === 'ym2413') {
     renderYM2413(ch);
+  } else if (slot.active && slot.type === 'fm-drums') {
+    renderFMDrums(ch);
   } else if (!slot.active) {
     document.getElementById('detail-body').innerHTML = '<div style="color:var(--dim);text-align:center;padding:40px">No instrument loaded.<br>Select one from the dropdown.</div>';
   }
@@ -1111,8 +1353,11 @@ function cutoffToSlider(hz) { return Math.log(hz / 20) / Math.log(1000); }
 function sliderToCutoff(t)  { return 20 * Math.pow(1000, t); }
 
 /* Time helpers: slider 0-1 <-> 0.001s-5s (log) */
-function timeToSlider(t) { return Math.log(t / 0.001) / Math.log(5000); }
-function sliderToTime(s)  { return 0.001 * Math.pow(5000, s); }
+/* Envelope time ↔ slider position: power curve so fast times
+ * (1-50ms) are visually compressed near the left edge.
+ * 5ms ≈ 3% of width = nearly vertical line. */
+function timeToSlider(t) { return Math.pow(Math.max(0, (t - 0.001) / 4.999), 0.35); }
+function sliderToTime(s)  { return 0.001 + Math.pow(Math.max(0, s), 1/0.35) * 4.999; }
 
 function fmtTime(v) { return v < 1 ? (v*1000).toFixed(0) + ' ms' : v.toFixed(2) + ' s'; }
 
@@ -1735,6 +1980,12 @@ function updateDetail() {
   const slot = rackState.slots[activeDetail];
   if (!slot || !slot.active) return;
 
+  /* Sync detail type dropdown */
+  const dtSel = document.getElementById('detail-type-sel');
+  if (dtSel && document.activeElement !== dtSel) {
+    dtSel.value = slot.active ? slot.type : '';
+  }
+
   // LCD
   const lcdName = document.getElementById('lcd-name');
   const lcdNum = document.getElementById('lcd-num');
@@ -1747,6 +1998,46 @@ function updateDetail() {
 
   // Params — only update if slider not being dragged
   if (cs.params) {
+    /* FM drums: detect note selection change (from MIDI input), update sliders */
+    if (slot.type === 'fm-drums') {
+      /* Cache the preset name for the current editing note */
+      if (cs.editing_note !== undefined && cs.preset_name) {
+        fmdPadLabels[cs.editing_note] = cs.preset_name;
+        /* Update pad button label if visible */
+        const pads = document.getElementById('drum-pads');
+        if (pads) {
+          Array.from(pads.children).forEach(btn => {
+            if (parseInt(btn.dataset.note) === cs.editing_note)
+              btn.textContent = cs.preset_name;
+          });
+        }
+      }
+      if (cs.editing_note !== undefined && cs.editing_note !== fmdEditingNote) {
+        fmdEditingNote = cs.editing_note;
+        fmdUpdateSelection(activeDetail);
+      }
+      /* Sync preset dropdown */
+      const dtSel2 = document.getElementById('drum-type-sel');
+      if (dtSel2 && document.activeElement !== dtSel2 && cs.preset !== undefined) {
+        dtSel2.value = cs.preset;
+      }
+      /* Sync header label */
+      const lbl = document.getElementById('drum-edit-label');
+      if (lbl && cs.preset_name) lbl.textContent = cs.preset_name;
+      FMD_KNOB_DEFS.forEach(p => {
+        const slider = document.getElementById(`dslider-${p.key}`);
+        const valEl = document.getElementById(`dval-${p.key}`);
+        if (slider && document.activeElement !== slider) {
+          const v = cs.params[p.key];
+          if (v !== undefined) {
+            slider.value = v;
+            if (valEl) valEl.textContent = p.display ? p.display(v) : v.toFixed(3);
+          }
+        }
+      });
+      return;
+    }
+
     const defs = (slot.type === 'sub-synth') ? SUB_KNOB_DEFS : PARAM_DEFS;
     defs.forEach(p => {
       const slider = document.getElementById(`pslider-${p.key}`);
@@ -1798,6 +2089,183 @@ function updateDetail() {
     if (detVolVal) detVolVal.textContent = cs.volume.toFixed(2);
   }
 }
+
+// ── FM Drums detail view ─────────────────────────────────────────
+
+const FMD_DRUM_MAP = [
+  { idx: 0,  note: 36, label: 'KICK' },   { idx: 1,  note: 38, label: 'SNARE' },
+  { idx: 2,  note: 39, label: 'CLAP' },   { idx: 3,  note: 42, label: 'CH' },
+  { idx: 4,  note: 46, label: 'OH' },     { idx: 5,  note: 41, label: 'TOM' },
+  { idx: 6,  note: 37, label: 'RIM' },    { idx: 7,  note: 56, label: 'BELL' },
+  { idx: 8,  note: 49, label: 'CYMBAL' }, { idx: 9,  note: 52, label: 'ZAP' },
+  { idx: 10, note: 53, label: 'BOMB' },   { idx: 11, note: 54, label: 'GLITCH' },
+  { idx: 12, note: 55, label: 'SCRATCH' },{ idx: 13, note: 58, label: 'SHAKER' },
+  { idx: 14, note: 59, label: 'BLIP' },   { idx: 15, note: 60, label: 'RISER' },
+];
+
+const FMD_KNOB_DEFS = [
+  { key: 'carrier_freq', label: 'Carrier Hz',   min: 20,     max: 12000, step: 1,     display: v => Math.round(v) + ' Hz' },
+  { key: 'mod_freq',     label: 'Mod Hz',       min: 20,     max: 12000, step: 1,     display: v => Math.round(v) + ' Hz' },
+  { key: 'mod_index',    label: 'Mod Index',     min: 0,      max: 20,    step: 0.1,   display: v => v.toFixed(1) },
+  { key: 'pitch_sweep',  label: 'Pitch Sweep',   min: -2000,  max: 2000,  step: 1,     display: v => Math.round(v) + ' Hz' },
+  { key: 'pitch_decay',  label: 'Pitch Decay',   min: 0.001,  max: 0.5,   step: 0.001, display: v => (v*1000).toFixed(0) + 'ms' },
+  { key: 'decay',        label: 'Decay',          min: 0.01,   max: 3.0,   step: 0.01,  display: v => (v*1000).toFixed(0) + 'ms' },
+  { key: 'noise_amt',    label: 'Noise',          min: 0,      max: 1,     step: 0.01,  display: v => Math.round(v*100) + '%' },
+  { key: 'click_amt',    label: 'Click',          min: 0,      max: 1,     step: 0.01,  display: v => Math.round(v*100) + '%' },
+  { key: 'feedback',     label: 'Feedback',       min: 0,      max: 1,     step: 0.01,  display: v => v.toFixed(2) },
+];
+
+let fmdEditingNote = 36;
+
+const FMD_PRESET_NAMES = [
+  'Kick', 'Snare', 'Clap', 'CH', 'OH', 'Tom', 'Rim', 'Bell',
+  'Cymbal', 'Zap', 'Bomb', 'Glitch', 'Scratch', 'Shaker', 'Blip', 'Riser'
+];
+
+/* Cache: note → preset name, so pad labels reflect what's loaded */
+const fmdPadLabels = {};
+
+function renderFMDrums(ch) {
+  const body = document.getElementById('detail-body');
+  const cs = channelStates[ch] || {};
+  if (cs.editing_note !== undefined) fmdEditingNote = cs.editing_note;
+  const presetIdx = cs.preset !== undefined ? cs.preset : 0;
+  const presetName = cs.preset_name || FMD_PRESET_NAMES[presetIdx] || 'Kick';
+
+  let presetOpts = '';
+  FMD_PRESET_NAMES.forEach((name, i) => {
+    const sel = (i === presetIdx) ? ' selected' : '';
+    presetOpts += `<option value="${i}"${sel}>${name}</option>`;
+  });
+
+  body.innerHTML = `
+    <div class="keyboard-section">
+      <h3>Kit — play a note to select &amp; edit</h3>
+      <div id="drum-pads" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;"></div>
+    </div>
+    <div class="params-section">
+      <div class="params-header" style="gap:8px;">
+        <h3 id="drum-edit-label" style="white-space:nowrap;">Note ${fmdEditingNote}</h3>
+        <select class="detail-type-select" id="drum-type-sel" style="min-width:60px;font-size:12px;">${presetOpts}</select>
+        <button class="reset-btn" id="drum-reset">Reset</button>
+      </div>
+      <div class="params-grid" id="drum-params"></div>
+    </div>
+    <div class="detail-volume">
+      <label>Volume</label>
+      <input type="range" id="detail-vol" min="0" max="1" step="0.01" value="${cs.volume !== undefined ? cs.volume : 1}">
+      <span class="val" id="detail-vol-val">${cs.volume !== undefined ? cs.volume.toFixed(2) : '1.00'}</span>
+    </div>
+  `;
+
+  /* Drum pads — show current preset name per note */
+  const pads = document.getElementById('drum-pads');
+  FMD_DRUM_MAP.forEach(d => {
+    const btn = document.createElement('button');
+    const isActive = d.note === fmdEditingNote;
+    btn.className = 'family-btn' + (isActive ? ' active' : '');
+    /* Use cached label if available, otherwise default */
+    btn.textContent = fmdPadLabels[d.note] || d.label;
+    btn.style.padding = '12px 8px';
+    btn.style.fontSize = '11px';
+    btn.dataset.note = d.note;
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      send({ type: 'note_on', channel: ch, note: d.note, velocity: 100 });
+      fmdEditingNote = d.note;
+      fmdUpdateSelection(ch);
+    });
+    btn.addEventListener('mouseup', () => {
+      send({ type: 'note_off', channel: ch, note: d.note });
+    });
+    pads.appendChild(btn);
+  });
+
+  /* Drum type dropdown — load a preset into the selected note */
+  document.getElementById('drum-type-sel').addEventListener('change', (e) => {
+    const preset = parseInt(e.target.value);
+    send({ type: 'ch', channel: ch, path: '/load_preset', iargs: [preset] });
+    /* Update the pad label for this note */
+    fmdPadLabels[fmdEditingNote] = FMD_PRESET_NAMES[preset];
+    const pads2 = document.getElementById('drum-pads');
+    if (pads2) {
+      Array.from(pads2.children).forEach(btn => {
+        if (parseInt(btn.dataset.note) === fmdEditingNote)
+          btn.textContent = FMD_PRESET_NAMES[preset];
+      });
+    }
+    setTimeout(() => renderDrumParams(ch), 100);
+  });
+
+  /* Reset button */
+  document.getElementById('drum-reset').addEventListener('click', () => {
+    send({ type: 'ch', channel: ch, path: '/reset' });
+    setTimeout(() => renderDrumParams(ch), 100);
+  });
+
+  renderDrumParams(ch);
+
+  /* Volume */
+  const detVol = document.getElementById('detail-vol');
+  detVol.addEventListener('input', (e) => {
+    const val = parseFloat(e.target.value);
+    document.getElementById('detail-vol-val').textContent = val.toFixed(2);
+    send({ type: 'ch', channel: ch, path: '/volume', fargs: [val] });
+  });
+}
+
+/* Update pad highlights and header when selection changes */
+function fmdUpdateSelection(ch) {
+  const pads = document.getElementById('drum-pads');
+  if (pads) {
+    Array.from(pads.children).forEach(btn => {
+      btn.classList.toggle('active', parseInt(btn.dataset.note) === fmdEditingNote);
+    });
+  }
+  /* Show the preset name for this note in the header */
+  const cs = channelStates[ch] || {};
+  const padLabel = fmdPadLabels[fmdEditingNote] || cs.preset_name || 'Note ' + fmdEditingNote;
+  const lbl = document.getElementById('drum-edit-label');
+  if (lbl) lbl.textContent = padLabel;
+  setTimeout(() => renderDrumParams(ch), 80);
+}
+
+function renderDrumParams(ch) {
+  const grid = document.getElementById('drum-params');
+  if (!grid) return;
+  const cs = channelStates[ch] || {};
+  const params = cs.params || {};
+
+  grid.innerHTML = '';
+  FMD_KNOB_DEFS.forEach(p => {
+    const val = params[p.key] !== undefined ? params[p.key] : 0;
+    const div = document.createElement('div');
+    div.className = 'param-control';
+    div.innerHTML = `
+      <div class="param-label">
+        <span class="name">${p.label}</span>
+        <span class="val" id="dval-${p.key}">${p.display ? p.display(val) : val.toFixed(3)}</span>
+      </div>
+      <input type="range" class="param-slider" id="dslider-${p.key}"
+             min="${p.min}" max="${p.max}" step="${p.step}" value="${val}">
+    `;
+    grid.appendChild(div);
+
+    const slider = div.querySelector(`#dslider-${p.key}`);
+    slider.addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      const valEl = document.getElementById(`dval-${p.key}`);
+      if (valEl) valEl.textContent = p.display ? p.display(v) : v.toFixed(3);
+      send({ type: 'ch', channel: ch, path: '/param/' + p.key, fargs: [v] });
+    });
+  });
+}
+
+// ── Logo click → close detail ────────────────────────────────────
+
+document.querySelector('#topbar .logo').addEventListener('click', () => {
+  if (activeDetail >= 0) closeDetail();
+});
 
 // ── Init ─────────────────────────────────────────────────────────
 

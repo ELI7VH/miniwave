@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>KeySeq Expression Tester</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root { --bg: #0d0d0d; --panel: #1a1a2e; --card: #16213e; --accent: #e94560; --good: #00d4aa; --text: #e0e0e0; --dim: #666; --border: #2a2a4a; }
+html, body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; height: 100%; overflow: hidden; }
+
+#page { display: flex; flex-direction: column; height: 100%; padding: 16px 20px; gap: 12px; }
+
+#header { flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+#header h1 { color: var(--accent); font-size: 16px; white-space: nowrap; }
+
+/* ch nav */
+.ch-nav { display: flex; align-items: center; gap: 2px; }
+.ch-nav button { width: 22px; height: 22px; padding: 0; font-size: 13px; line-height: 22px; text-align: center; border-radius: 3px; background: var(--card); border: 1px solid var(--border); color: var(--dim); cursor: pointer; }
+.ch-nav button:hover { border-color: var(--accent); color: var(--text); }
+.ch-label { font-size: 13px; font-weight: bold; color: var(--text); min-width: 90px; text-align: center; }
+
+/* midi select in header */
+.midi-sel { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.midi-sel label { margin: 0; font-size: 10px; color: var(--dim); text-transform: uppercase; }
+.midi-sel select { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 3px 6px; font-family: inherit; font-size: 11px; border-radius: 4px; min-width: 140px; }
+
+#columns { display: flex; gap: 14px; flex: 1; min-height: 0; }
+#col-left { flex: 1; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-width: 0; }
+#col-right { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+.section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px; flex-shrink: 0; }
+.section h3 { color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+/* preset-header has its own h3 styling */
+.preset-header { padding-bottom: 6px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.preset-header h3 { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+label { color: var(--dim); font-size: 11px; text-transform: uppercase; display: block; margin-bottom: 3px; }
+input[type=text], textarea { background: var(--card); border: 1px solid var(--border); color: var(--text); font-family: inherit; font-size: 13px; padding: 6px 8px; border-radius: 4px; width: 100%; }
+input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { resize: none; font-size: 12px; }
+textarea[readonly] { opacity: 0.7; cursor: default; }
+
+button { background: var(--accent); color: white; border: none; padding: 5px 12px; border-radius: 4px; font-family: inherit; font-size: 11px; cursor: pointer; }
+button:hover { opacity: 0.85; }
+button.secondary { background: var(--card); border: 1px solid var(--border); color: var(--text); }
+button.stop { background: #555; }
+button.send { background: var(--good); color: #000; }
+
+.presets { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.preset-btn { padding: 4px 10px; font-size: 11px; border-radius: 4px; background: var(--card); border: 1px solid var(--border); color: var(--text); cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+.preset-btn:hover { border-color: var(--accent); }
+.preset-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+
+/* preset header: title + rename input + add btn */
+.preset-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.preset-header h3 { margin: 0; flex-shrink: 0; }
+.preset-header input { flex: 1; min-width: 0; padding: 3px 6px; font-size: 12px; }
+.preset-header button { flex-shrink: 0; padding: 3px 8px; font-size: 13px; font-weight: bold; }
+
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; }
+
+.tog { display: flex; gap: 4px; }
+.tog-btn { padding: 3px 10px; font-size: 11px; font-weight: bold; border-radius: 3px; background: var(--card); border: 1px solid var(--border); color: var(--dim); cursor: pointer; transition: all 0.15s; }
+.tog-btn.on { background: var(--accent); border-color: var(--accent); color: white; }
+
+.pill { display: flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin-left: auto; flex-shrink: 0; }
+.pill-opt { padding: 3px 10px; font-size: 11px; cursor: pointer; color: var(--dim); background: var(--card); border: none; font-family: inherit; transition: all 0.15s; }
+.pill-opt.on { background: var(--accent); color: white; }
+
+.expr-row { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
+.expr-row .elabel { width: 16px; flex-shrink: 0; color: var(--accent); font-weight: bold; font-size: 13px; text-align: center; }
+.expr-row input { flex: 1; }
+.expr-row.disabled input { opacity: 0.3; pointer-events: none; }
+.expr-row.disabled .elabel { opacity: 0.3; }
+
+#preview-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+#preview-wrap h3 { padding: 10px 12px 6px; color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; flex-shrink: 0; margin: 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+#preview-wrap h3 .stats { color: var(--dim); font-weight: normal; margin-left: auto; }
+#preview { flex: 1; overflow-y: auto; padding: 8px 12px; font-size: 12px; white-space: pre-wrap; line-height: 1.6; }
+.note-line .step { color: var(--dim); display: inline-block; width: 28px; text-align: right; margin-right: 8px; }
+.note-line .note { color: var(--good); display: inline-block; width: 72px; }
+.note-line .vel { color: var(--accent); }
+.note-line .time { color: var(--dim); }
+
+#dsl-section { flex-shrink: 0; }
+#dsl-section textarea { height: 48px; }
+
+#offsets-section { display: none; }
+
+.play-btn { width: 24px; height: 24px; padding: 0; font-size: 14px; line-height: 24px; text-align: center; border-radius: 50%; background: var(--good); color: #000; border: none; cursor: pointer; flex-shrink: 0; }
+.play-btn:hover { opacity: 0.85; }
+.status { color: var(--good); font-size: 11px; }
+.inline-input { background: var(--card); border: 1px solid var(--border); color: var(--text); font-family: inherit; font-size: 11px; padding: 2px 4px; border-radius: 3px; text-align: center; }
+.inline-input:focus { outline: none; border-color: var(--accent); }
+
+#param-index { max-height: 200px; overflow-y: auto; }
+#param-list span { cursor: pointer; transition: color 0.15s; }
+#param-list span:hover { color: var(--good); }
+
+.bpm-group { display: flex; align-items: center; gap: 4px; }
+.bpm-group input { width: 48px; padding: 3px 6px; font-size: 13px; text-align: center; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 4px; font-family: inherit; }
+.bpm-group input:focus { outline: none; border-color: var(--accent); }
+.bpm-group .bpm-label { font-size: 10px; color: var(--dim); text-transform: uppercase; }
+.tap-btn { padding: 4px 10px; font-size: 11px; font-weight: bold; border-radius: 4px; background: var(--card); border: 1px solid var(--border); color: var(--text); cursor: pointer; transition: background 0.1s; user-select: none; -webkit-user-select: none; }
+.tap-btn:active { background: var(--accent); color: white; border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div id="page">
+
+<div id="header">
+  <h1>KeySeq</h1>
+  <div class="ch-nav">
+    <button id="ch-prev" title="Prev channel (Cmd+[)">&lsaquo;</button>
+    <span class="ch-label" id="ch-label">CH 1</span>
+    <button id="ch-next" title="Next channel (Cmd+])">&rsaquo;</button>
+  </div>
+  <div class="bpm-group">
+    <input type="text" id="bpm-input" value="120">
+    <span class="bpm-label">bpm</span>
+    <button class="tap-btn" id="tap-btn">TAP</button>
+  </div>
+  <div class="midi-sel">
+    <label>MIDI</label>
+    <select id="midi-select"><option value="">No Device</option></select>
+  </div>
+</div>
+
+<div id="columns">
+
+  <div id="col-left">
+
+    <div class="section">
+      <div class="preset-header">
+        <h3>Presets</h3>
+        <input type="text" id="preset-name" placeholder="name" value="My Sequence">
+        <button class="secondary" id="preset-add" title="Duplicate preset">+</button>
+        <button class="secondary" id="preset-del" title="Delete preset" style="color:var(--accent)">&times;</button>
+      </div>
+      <div class="presets" id="preset-bar"></div>
+    </div>
+
+    <div class="section">
+      <h3>
+        Mode
+        <div class="tog">
+          <button class="tog-btn on" id="btn-gated" onclick="toggleMode('cb-gated')">gated</button>
+          <button class="tog-btn" id="btn-loop" onclick="toggleMode('cb-loop')">loop</button>
+        </div>
+        <div class="pill">
+          <button class="pill-opt on" id="pill-algo" onclick="setInputMode('algo')">algo</button>
+          <button class="pill-opt" id="pill-offsets" onclick="setInputMode('offsets')">offsets</button>
+        </div>
+      </h3>
+      <input type="checkbox" id="cb-gated" checked hidden>
+      <input type="checkbox" id="cb-loop" hidden>
+      <input type="checkbox" id="cb-algo" checked hidden>
+      <div class="row">
+        <div>
+          <label>Step (beats)</label>
+          <input type="text" id="step-t" value="0.125">
+        </div>
+        <div>
+          <label>Gate (beats)</label>
+          <input type="text" id="gate-t" value="">
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="algo-section">
+      <h3>
+        Seq Algo
+        <div class="tog">
+          <button class="tog-btn on" data-expr="n" onclick="toggleExpr(this)">n</button>
+          <button class="tog-btn on" data-expr="v" onclick="toggleExpr(this)">v</button>
+          <button class="tog-btn" data-expr="t" onclick="toggleExpr(this)">t</button>
+          <button class="tog-btn" data-expr="g" onclick="toggleExpr(this)">g</button>
+        </div>
+      </h3>
+      <div class="expr-row" id="row-n"><span class="elabel">n</span><input type="text" id="expr-n" value="n+1" placeholder="note expr"></div>
+      <div class="expr-row" id="row-v"><span class="elabel">v</span><input type="text" id="expr-v" value="v-0.03" placeholder="velocity expr"></div>
+      <div class="expr-row disabled" id="row-t"><span class="elabel">t</span><input type="text" id="expr-t" value="" placeholder="step time expr"></div>
+      <div class="expr-row disabled" id="row-g"><span class="elabel">g</span><input type="text" id="expr-g" value="" placeholder="gate time expr"></div>
+      <p style="color:var(--dim);font-size:10px;margin-top:4px">n v t g i root rv time bu gate held dt &nbsp; + - * / % > < >= <= &nbsp; if(c,a,b) sin cos abs rand noise(x[,y,z]) pi tau</p>
+      <div class="expr-row" style="margin-top:6px">
+        <span class="elabel" style="color:var(--mute, #e94560);font-size:10px">end</span>
+        <input type="text" id="expr-end" value="v<=0" placeholder="end condition e.g. v<=0, n<root" style="font-size:11px">
+      </div>
+    </div>
+
+    <div class="section" id="frame-section">
+      <h3>Element Algo <span style="color:var(--dim);font-weight:normal;font-size:10px;margin-left:4px">per-frame modulation</span></h3>
+      <div class="expr-row">
+        <span class="elabel" style="color:var(--good)">&cent;</span>
+        <input type="text" id="expr-frame" value="" placeholder="e.g. sin(time*6)*50">
+      </div>
+      <p style="color:var(--dim);font-size:10px;margin-top:4px">time bu gate dt n v i root rv &nbsp; returns cents offset</p>
+    </div>
+
+    <div class="section" id="param-index">
+      <h3>Params <span style="color:var(--dim);font-weight:normal;font-size:10px;margin-left:4px" id="param-inst-name"></span></h3>
+      <div id="param-list" style="font-size:11px;color:var(--dim);columns:2;column-gap:12px;line-height:1.8"></div>
+    </div>
+
+    <div class="section" id="offsets-section">
+      <h3>Offsets</h3>
+      <div class="row">
+        <div><label>Semitones</label><input type="text" id="offsets" value="0,12,7,12"></div>
+        <div><label>Levels</label><input type="text" id="levels" value="1,0.7,0.5,0.3"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="col-right">
+
+    <div class="section" id="dsl-section">
+      <h3>DSL <input type="text" id="seed-input" class="inline-input" style="width:80px;margin-left:auto" value="" placeholder="seed expr" title="Seed expression: v, n, root, rand(), etc."></h3>
+      <textarea id="dsl-output" readonly></textarea>
+    </div>
+
+    <div id="preview-wrap">
+      <h3>
+        Preview
+        <button class="play-btn" id="play-btn" onclick="playPreview()" title="Send + Trigger">&#9654;</button>
+        <input type="text" id="root-note" value="C4" class="inline-input" style="width:36px" title="Root note">
+        <input type="text" id="root-vel" value="100" class="inline-input" style="width:30px" title="Velocity">
+        <span class="status" id="status"></span>
+        <span class="stats" id="preview-stats"></span>
+      </h3>
+      <div id="preview"></div>
+    </div>
+
+  </div>
+
+</div>
+
+</div>
+
+<script>
+'use strict';
+
+const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function noteName(n) { return NOTES[n % 12] + Math.floor(n / 12 - 1); }
+function parseNoteName(s) {
+  s = s.trim();
+  if (/^\d+$/.test(s)) return parseInt(s);
+  const m = s.match(/^([A-Ga-g])(#|b)?(\d)$/);
+  if (!m) return 60;
+  const base = {C:0,D:2,E:4,F:5,G:7,A:9,B:11}[m[1].toUpperCase()];
+  const acc = m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0;
+  return (parseInt(m[3]) + 1) * 12 + base + acc;
+}
+
+/* Known params per instrument type */
+const INST_PARAMS = {
+  'fm-synth': ['carrier_ratio','mod_ratio','mod_index','attack','decay','sustain','release','feedback'],
+  'sub-synth': ['waveform','pulse_width','filter_cutoff','filter_reso','filter_env_depth','filt_attack','filt_decay','filt_sustain','filt_release','amp_attack','amp_decay','amp_sustain','amp_release'],
+  'ym2413': ['instrument','volume','rhythm','vibrato','portamento','pitchbend'],
+  'fm-drums': ['carrier_freq','mod_freq','mod_index','pitch_sweep','pitch_decay','decay','noise_amt','click_amt','feedback'],
+};
+
+const LS_PRESETS = 'miniwave_keyseq_presets';
+const LS_ACTIVE = 'miniwave_keyseq_active';
+const LS_CHANNEL = 'miniwave_keyseq_channel';
+
+/* ── State ── */
+let presets = [];       // [{key, label, ...data}]
+let activeIdx = 0;
+let activeCh = 0;
+let rackSlots = [];     // from SSE
+let midiDevices = [];
+
+/* ── Default presets ── */
+const FACTORY = [
+  { key:'user',    label:'My Sequence', t:'0.125', g:'', gated:true, loop:false, algo:true, offsets:'0,12,7,12', levels:'1,0.7,0.5,0.3', n:'n+1', v:'v-0.03', et:'', eg:'', end:'v<=0', frame:'', en:{n:true,v:true,t:false,g:false} },
+  { key:'shimmer', label:'Shimmer',     t:'0.125', g:'0.6', gated:false, loop:true, algo:false, offsets:'0,12,7,12', levels:'1,0.7,0.5,0.3', n:'', v:'', et:'', eg:'', en:{n:false,v:false,t:false,g:false} },
+  { key:'climb',   label:'Climb',       t:'0.125', g:'', gated:true, loop:false, algo:true, n:'n+1', v:'v-0.03', et:'', eg:'', en:{n:true,v:true,t:false,g:false} },
+  { key:'siren',   label:'Siren',       t:'0.5', g:'', gated:true, loop:false, algo:true, n:'root+i%2*10-5', v:'v', et:'', eg:'', en:{n:true,v:true,t:false,g:false} },
+  { key:'gun',     label:'Rapid Fire',  t:'0.2', g:'0.1', gated:true, loop:false, algo:true, n:'n', v:'v-0.005', et:'', eg:'', en:{n:true,v:true,t:false,g:false} },
+  { key:'fifths',  label:'Circle of 5ths', t:'0.125', g:'', gated:true, loop:false, algo:true, n:'root+i*7%12', v:'v-0.01', et:'', eg:'', en:{n:true,v:true,t:false,g:false} },
+  { key:'bounce',  label:'Bounce',      t:'0.125', g:'', gated:true, loop:false, algo:true, n:'root+abs(i%8-4)*3', v:'v-0.02', et:'', eg:'', en:{n:true,v:true,t:false,g:false} },
+  { key:'scatter', label:'Scatter',     t:'0.1', g:'0.08', gated:true, loop:false, algo:true, n:'root+i*13%24-12', v:'v-0.015', et:'', eg:'', en:{n:true,v:true,t:false,g:false} },
+];
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(LS_PRESETS);
+    if (raw) presets = JSON.parse(raw);
+  } catch(e) {}
+  if (!presets.length) presets = JSON.parse(JSON.stringify(FACTORY));
+  activeIdx = parseInt(localStorage.getItem(LS_ACTIVE)) || 0;
+  if (activeIdx >= presets.length) activeIdx = 0;
+  activeCh = parseInt(localStorage.getItem(LS_CHANNEL)) || 0;
+}
+
+function savePresets() {
+  try { localStorage.setItem(LS_PRESETS, JSON.stringify(presets)); } catch(e) {}
+}
+
+function saveActiveIdx() {
+  try { localStorage.setItem(LS_ACTIVE, String(activeIdx)); } catch(e) {}
+}
+
+function saveCh() {
+  try { localStorage.setItem(LS_CHANNEL, String(activeCh)); } catch(e) {}
+}
+
+/* ── Expression toggles ── */
+const exprEnabled = { n: true, v: true, t: false, g: false };
+
+function toggleExpr(btn) {
+  const k = btn.dataset.expr;
+  exprEnabled[k] = !exprEnabled[k];
+  btn.classList.toggle('on', exprEnabled[k]);
+  document.getElementById('row-' + k).classList.toggle('disabled', !exprEnabled[k]);
+  autoSave(); simulate();
+}
+
+function syncExprToggles() {
+  for (const k of ['n','v','t','g']) {
+    const btn = document.querySelector(`.tog-btn[data-expr="${k}"]`);
+    if (btn) btn.classList.toggle('on', exprEnabled[k]);
+    document.getElementById('row-' + k).classList.toggle('disabled', !exprEnabled[k]);
+  }
+}
+
+/* ── Mode toggles ── */
+function toggleMode(cbId) {
+  const cb = document.getElementById(cbId);
+  cb.checked = !cb.checked;
+  syncModeButtons();
+  autoSave(); simulate();
+}
+
+function setInputMode(mode) {
+  const isAlgo = mode === 'algo';
+  document.getElementById('cb-algo').checked = isAlgo;
+  syncModeButtons();
+  autoSave(); simulate();
+}
+
+function syncModeButtons() {
+  document.getElementById('btn-gated').classList.toggle('on', document.getElementById('cb-gated').checked);
+  document.getElementById('btn-loop').classList.toggle('on', document.getElementById('cb-loop').checked);
+  const isAlgo = document.getElementById('cb-algo').checked;
+  document.getElementById('pill-algo').classList.toggle('on', isAlgo);
+  document.getElementById('pill-offsets').classList.toggle('on', !isAlgo);
+  document.getElementById('algo-section').style.display = isAlgo ? '' : 'none';
+  document.getElementById('offsets-section').style.display = isAlgo ? 'none' : '';
+}
+
+/* ── Channel navigation ── */
+function setCh(ch) {
+  if (ch < 0) ch = 15;
+  if (ch > 15) ch = 0;
+  activeCh = ch;
+  saveCh();
+  updateChLabel();
+}
+
+function updateChLabel() {
+  const s = rackSlots[activeCh];
+  const info = s && s.active ? s.type : '';
+  document.getElementById('ch-label').textContent = `CH ${activeCh + 1}${info ? ' ' + info : ''}`;
+  updateParamIndex();
+}
+
+document.getElementById('ch-prev').addEventListener('click', () => setCh(activeCh - 1));
+document.getElementById('ch-next').addEventListener('click', () => setCh(activeCh + 1));
+
+/* Cmd+[ and Cmd+] for channel nav (global) */
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey && e.key === '[') { e.preventDefault(); setCh(activeCh - 1); }
+  if (e.metaKey && e.key === ']') { e.preventDefault(); setCh(activeCh + 1); }
+});
+
+/* ── Capture form → preset data ── */
+function captureState() {
+  return {
+    t: document.getElementById('step-t').value,
+    g: document.getElementById('gate-t').value,
+    gated: document.getElementById('cb-gated').checked,
+    loop: document.getElementById('cb-loop').checked,
+    algo: document.getElementById('cb-algo').checked,
+    n: document.getElementById('expr-n').value,
+    v: document.getElementById('expr-v').value,
+    et: document.getElementById('expr-t').value,
+    eg: document.getElementById('expr-g').value,
+    offsets: document.getElementById('offsets').value,
+    levels: document.getElementById('levels').value,
+    frame: document.getElementById('expr-frame').value,
+    end: document.getElementById('expr-end').value,
+    seed: document.getElementById('seed-input').value,
+    en: { ...exprEnabled },
+  };
+}
+
+function autoSave() {
+  Object.assign(presets[activeIdx], captureState());
+  savePresets();
+}
+
+/* ── Preset bar ── */
+function buildPresetBar() {
+  const bar = document.getElementById('preset-bar');
+  bar.innerHTML = '';
+  presets.forEach((p, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'preset-btn' + (i === activeIdx ? ' active' : '');
+    btn.textContent = p.label;
+    btn.addEventListener('click', () => selectPreset(i));
+    bar.appendChild(btn);
+  });
+}
+
+function selectPreset(idx) {
+  autoSave();
+  activeIdx = idx;
+  saveActiveIdx();
+  applyPreset(presets[idx]);
+  buildPresetBar();
+}
+
+function applyPreset(p) {
+  document.getElementById('preset-name').value = p.label || '';
+  document.getElementById('step-t').value = p.t || '0.125';
+  document.getElementById('gate-t').value = p.g || '';
+  document.getElementById('cb-gated').checked = !!p.gated;
+  document.getElementById('cb-loop').checked = !!p.loop;
+  document.getElementById('cb-algo').checked = p.algo !== false;
+  document.getElementById('expr-n').value = p.n || '';
+  document.getElementById('expr-v').value = p.v || '';
+  document.getElementById('expr-t').value = p.et || '';
+  document.getElementById('expr-g').value = p.eg || '';
+  document.getElementById('offsets').value = p.offsets || '0,12,7,12';
+  document.getElementById('levels').value = p.levels || '1,0.7,0.5,0.3';
+  document.getElementById('expr-frame').value = p.frame || '';
+  document.getElementById('expr-end').value = p.end || 'v<=0';
+  document.getElementById('seed-input').value = p.seed || '';
+  syncModeButtons();
+  if (p.en) { Object.assign(exprEnabled, p.en); }
+  syncExprToggles();
+  simulate();
+}
+
+/* Rename */
+document.getElementById('preset-name').addEventListener('input', (e) => {
+  presets[activeIdx].label = e.target.value;
+  savePresets();
+  buildPresetBar();
+});
+
+/* Duplicate */
+document.getElementById('preset-add').addEventListener('click', () => {
+  autoSave();
+  const src = presets[activeIdx];
+  const dup = JSON.parse(JSON.stringify(src));
+  dup.key = 'custom_' + Date.now();
+  dup.label = src.label + ' copy';
+  presets.push(dup);
+  activeIdx = presets.length - 1;
+  savePresets(); saveActiveIdx();
+  buildPresetBar();
+  applyPreset(dup);
+});
+
+/* Delete */
+document.getElementById('preset-del').addEventListener('click', () => {
+  if (presets.length <= 1) return;
+  if (!confirm(`Delete "${presets[activeIdx].label}"?`)) return;
+  presets.splice(activeIdx, 1);
+  if (activeIdx >= presets.length) activeIdx = presets.length - 1;
+  savePresets(); saveActiveIdx();
+  buildPresetBar();
+  applyPreset(presets[activeIdx]);
+});
+
+/* ── Track last focused expression input for param insertion ── */
+let lastExprField = null;
+for (const id of ['expr-n','expr-v','expr-t','expr-g','expr-frame','expr-end']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('focus', () => { lastExprField = el; });
+}
+
+/* ── Build DSL ── */
+function buildDSL() {
+  const t = document.getElementById('step-t').value.trim();
+  const g = document.getElementById('gate-t').value.trim();
+  const gated = document.getElementById('cb-gated').checked;
+  const loop = document.getElementById('cb-loop').checked;
+  const algo = document.getElementById('cb-algo').checked;
+
+  let parts = [];
+  if (t) parts.push('t' + t);
+  if (g) parts.push('g' + g);
+  if (gated) parts.push('gated');
+  if (loop) parts.push('loop');
+
+  if (algo) {
+    parts.push('algo');
+    for (const k of ['n','v','t','g']) {
+      if (!exprEnabled[k]) continue;
+      const val = document.getElementById('expr-' + k).value.trim();
+      if (val) parts.push(k + ':' + val);
+    }
+  } else {
+    const offsets = document.getElementById('offsets').value.trim();
+    const levels = document.getElementById('levels').value.trim();
+    if (offsets) parts.push(offsets);
+    if (levels) parts.push('v' + levels);
+  }
+
+  const frame = document.getElementById('expr-frame').value.trim();
+  if (frame) parts.push('frame:' + frame);
+
+  const end = document.getElementById('expr-end').value.trim();
+  if (end) parts.push('end:' + end);
+
+  const seed = document.getElementById('seed-input').value.trim();
+  if (seed) parts.push('seed:' + seed);
+
+  return parts.join('; ');
+}
+
+/* ── Expression eval ── */
+/* Simplex noise (JS port for preview) */
+const _p = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+const perm = [..._p,..._p];
+function _noise2d(x,y){const F=0.3660254,G=0.2113249;let s=(x+y)*F,i=Math.floor(x+s),j=Math.floor(y+s),tt=(i+j)*G,x0=x-(i-tt),y0=y-(j-tt),i1=x0>y0?1:0,j1=x0>y0?0:1,x1=x0-i1+G,y1=y0-j1+G,x2=x0-1+2*G,y2=y0-1+2*G,ii=i&255,jj=j&255;function gr(h,a,b){h&=7;let u=h<4?a:b,vv=h<4?b:a;return((h&1)?-u:u)+((h&2)?-2*vv:2*vv)}let n0=0,n1=0,n2=0,t0=.5-x0*x0-y0*y0;if(t0>0){t0*=t0;n0=t0*t0*gr(perm[ii+perm[jj]],x0,y0)}let t1=.5-x1*x1-y1*y1;if(t1>0){t1*=t1;n1=t1*t1*gr(perm[ii+i1+perm[jj+j1]],x1,y1)}let t2=.5-x2*x2-y2*y2;if(t2>0){t2*=t2;n2=t2*t2*gr(perm[ii+1+perm[jj+1]],x2,y2)}return 70*(n0+n1+n2)}
+let _noiseSeed = 0;
+function noise(x,y,z){const s=_noiseSeed;if(z!==undefined)return(_noise2d(x+s,y+s)+_noise2d(y+31.416+s,z+17.329+s)+_noise2d(z+47.853+s,x+11.721+s))/3;if(y!==undefined)return _noise2d(x+s,y+s);const xx=x+s;return _noise2d(xx,xx*0.7+13.37)}
+
+let _rs = 1;
+function rand() { _rs ^= _rs << 13; _rs ^= _rs >>> 17; _rs ^= _rs << 5; return (_rs & 0x7FFFFFFF) / 0x7FFFFFFF; }
+
+function evalExpr(src, ctx) {
+  if (!src || !src.trim()) return null;
+  try {
+    const _if = (c,a,b) => c ? a : b;
+    const fn = new Function('n','v','t','g','i','root','rv','time','bu','gate','held','dt',
+      'abs','sin','cos','rand','noise','pi','tau','_if',
+      'const if_=_if; return (' + src.replace(/\bif\s*\(/g, 'if_(') + ')');
+    return fn(ctx.n, ctx.v, ctx.t, ctx.g, ctx.i, ctx.root, ctx.rv,
+              ctx.time||0, ctx.bu||0, ctx.gate||0, ctx.held||0, ctx.dt||0.0000208,
+              Math.abs, Math.sin, Math.cos, rand, noise, Math.PI, Math.PI*2, _if);
+  } catch(e) { return null; }
+}
+
+/* ── Simulate ── */
+const MAX_SIM = 512; /* hard safety cap */
+
+function simulate() {
+  const dsl = buildDSL();
+  document.getElementById('dsl-output').value = dsl;
+
+  const root = parseNoteName(document.getElementById('root-note').value);
+  const vel = (parseInt(document.getElementById('root-vel').value) || 100) / 127;
+  const maxSteps = MAX_SIM;
+  const stepT = parseFloat(document.getElementById('step-t').value) || 0.125;
+  const gateT = parseFloat(document.getElementById('gate-t').value) || stepT * 0.8;
+  const algo = document.getElementById('cb-algo').checked;
+  const endExpr = document.getElementById('expr-end').value.trim();
+
+  let html = '';
+  let totalBeats = 0;
+  let totalSteps = 0;
+
+  if (algo) {
+    const exN = exprEnabled.n ? document.getElementById('expr-n').value.trim() : '';
+    const exV = exprEnabled.v ? document.getElementById('expr-v').value.trim() : '';
+    const exT = exprEnabled.t ? document.getElementById('expr-t').value.trim() : '';
+    const exG = exprEnabled.g ? document.getElementById('expr-g').value.trim() : '';
+    const exFrame = document.getElementById('expr-frame').value.trim();
+
+    /* Evaluate seed expression for deterministic preview */
+    const seedExpr = document.getElementById('seed-input').value.trim();
+    let seedVal;
+    if (seedExpr) {
+      const rawVel = parseInt(document.getElementById('root-vel').value) || 100;
+      const seedCtx = { n: root, v: rawVel, rv: vel, root, i: 0, time: 0, gate: 0 };
+      const sv = evalExpr(seedExpr, seedCtx);
+      seedVal = sv !== null ? (Math.abs(sv) * 2654435761 >>> 0) || 1 : (root * 7919 + 1);
+    } else {
+      seedVal = root * 7919 + 1;
+    }
+    _rs = (seedVal | 1) >>> 0;
+    _noiseSeed = seedVal * 0.01;
+
+    const bpm = parseInt(document.getElementById('bpm-input').value) || 120;
+    let ctx = { n: root, v: vel, t: stepT, g: gateT, i: 0, root, rv: vel, time: 0, bu: 0, gate: 0 };
+
+    /* Step 0 = root note (unmodified) */
+    html += line(0, root, 0, vel, ctx.t, ctx.g, totalBeats, exFrame ? evalFrameAt(exFrame, ctx, 0) : null);
+    totalBeats += ctx.t; totalSteps = 1;
+
+    for (let i = 1; i < MAX_SIM; i++) {
+      ctx.i = i;
+      ctx.time = totalBeats * 60 / bpm;
+
+      let newN = exN ? evalExpr(exN, ctx) : ctx.n;
+      let newV = exV ? evalExpr(exV, ctx) : ctx.v;
+      let newT = exT ? evalExpr(exT, ctx) : ctx.t;
+      let newG = exG ? evalExpr(exG, ctx) : ctx.g;
+      if (newN === null || newV === null) { html += '<div style="color:var(--accent)">expr error</div>'; break; }
+      ctx.n = newN; ctx.v = newV;
+      if (newT !== null) ctx.t = Math.max(newT, 0.001);
+      if (newG !== null) ctx.g = Math.max(newG, 0.001);
+
+      let nCents = (ctx.n - Math.round(ctx.n)) * 100;
+      html += line(i, ctx.n, nCents, ctx.v, ctx.t, ctx.g, totalBeats, exFrame ? evalFrameAt(exFrame, ctx, totalBeats) : null);
+      totalBeats += ctx.t; totalSteps++;
+
+      /* End condition — evaluated after step is rendered */
+      if (endExpr) {
+        const endVal = evalExpr(endExpr, ctx);
+        if (endVal && endVal !== 0) {
+          html += `<div style="color:var(--dim);padding:2px 0">end: ${endExpr} @ step ${i}</div>`;
+          break;
+        }
+      }
+    }
+  } else {
+    const offsets = document.getElementById('offsets').value.split(',').map(Number);
+    const levels = document.getElementById('levels').value.split(',').map(Number);
+    const loop = document.getElementById('cb-loop').checked;
+    const count = loop ? Math.min(maxSteps, offsets.length * 4) : offsets.length;
+    for (let i = 0; i < count; i++) {
+      const idx = i % offsets.length;
+      const note = Math.max(0, Math.min(127, root + (offsets[idx] || 0)));
+      const lev = levels[idx] !== undefined ? levels[idx] : 1;
+      html += line(i, note, 0, vel * lev, stepT, gateT, totalBeats, null);
+      totalBeats += stepT; totalSteps++;
+    }
+  }
+  document.getElementById('preview-stats').textContent = `${totalBeats.toFixed(2)}B \u00b7 ${totalSteps}S`;
+  document.getElementById('preview').innerHTML = html;
+
+  updateParamIndex();
+}
+
+/* Evaluate frame expr at a given time offset (for preview snapshot) */
+function evalFrameAt(exFrame, ctx, beatPos) {
+  if (!exFrame) return null;
+  const bpm = parseInt(document.getElementById('bpm-input').value) || 120;
+  const gateSec = ctx.g * 60 / bpm;
+  /* Snapshot at mid-gate for preview purposes */
+  const gateProgress = gateSec > 0 ? 0.5 : 0;
+  const fc = { ...ctx, time: beatPos * 60 / bpm, bu: 0.5, gate: gateProgress };
+  return evalExpr(exFrame, fc);
+}
+
+function line(i, rawN, nCents, vel, t, g, beat, frameCents) {
+  let midi = Math.round(rawN);
+  if (midi < 0) midi = 0; if (midi > 127) midi = 127;
+  const name = noteName(midi);
+
+  /* Build cents string from fractional n */
+  let cStr = '';
+  if (Math.abs(nCents) >= 0.5) {
+    cStr = `<span style="color:var(--dim)">${nCents >= 0 ? '+' : ''}${nCents.toFixed(0)}c</span>`;
+  }
+
+  /* Frame cents */
+  let fStr = '';
+  if (frameCents !== null && frameCents !== undefined) {
+    fStr = ` <span style="color:#8866cc">${frameCents >= 0 ? '+' : ''}${frameCents.toFixed(1)}c</span>`;
+  }
+
+  return `<div class="note-line"><span class="step">${i}</span><span class="note">${name}${cStr}</span><span class="vel">${vel.toFixed(3)}</span>${fStr} <span class="time">t=${t.toFixed(3)} @${beat.toFixed(2)}</span></div>`;
+}
+
+/* ── API ── */
+async function playPreview() {
+  const dsl = document.getElementById('dsl-output').value.trim();
+  const note = parseNoteName(document.getElementById('root-note').value);
+  const vel = parseInt(document.getElementById('root-vel').value) || 100;
+  try {
+    /* Send DSL */
+    await fetch('/api', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({type:'keyseq_dsl', channel:activeCh, dsl}) });
+    /* Trigger note */
+    await fetch('/api', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({type:'note_on', channel:activeCh, note, velocity:vel}) });
+    document.getElementById('status').textContent = `${noteName(note)} ch${activeCh+1}`;
+    /* Auto release after 4s */
+    setTimeout(async () => {
+      await fetch('/api', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({type:'note_off', channel:activeCh, note}) });
+      document.getElementById('status').textContent = '';
+    }, 4000);
+  } catch(e) { document.getElementById('status').textContent = e.message; }
+}
+
+/* ── Param index ── */
+function updateParamIndex() {
+  const s = rackSlots[activeCh];
+  const instName = s && s.active ? s.type : '';
+  document.getElementById('param-inst-name').textContent = instName;
+  const list = document.getElementById('param-list');
+  const params = INST_PARAMS[instName] || [];
+  if (!params.length) { list.innerHTML = '<span style="color:var(--dim)">no instrument</span>'; return; }
+  list.innerHTML = params.map(p =>
+    `<span title="Click to add ${p}:expr" onclick="insertParam('${p}')">${p}</span>`
+  ).join('<br>');
+}
+
+function insertParam(name) {
+  /* Insert into last focused expression field, or append to DSL as fallback */
+  if (lastExprField) {
+    const pos = lastExprField.selectionStart || lastExprField.value.length;
+    const val = lastExprField.value;
+    lastExprField.value = val.slice(0, pos) + name + val.slice(pos);
+    lastExprField.focus();
+    lastExprField.setSelectionRange(pos + name.length, pos + name.length);
+    autoSave(); simulate();
+  } else {
+    const ta = document.getElementById('dsl-output');
+    const cur = ta.value.trim();
+    ta.value = cur + (cur.endsWith(';') || !cur ? ' ' : '; ') + name + ':';
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+}
+
+/* ── MIDI select ── */
+document.getElementById('midi-select').addEventListener('change', (e) => {
+  fetch('/api', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'midi_device', value:e.target.value}) });
+});
+
+/* ── SSE ── */
+const es = new EventSource('/events');
+es.addEventListener('rack_status', (e) => {
+  try {
+    const d = JSON.parse(e.data);
+    rackSlots = d.slots;
+    updateChLabel();
+
+    /* Sync MIDI device */
+    const sel = document.getElementById('midi-select');
+    const serverDev = d.midi_device || '';
+    if (serverDev && sel.value !== serverDev) {
+      for (const opt of sel.options) {
+        if (serverDev.includes(opt.value) && opt.value) { sel.value = opt.value; break; }
+      }
+    }
+  } catch(e) {}
+});
+es.addEventListener('midi_devices', (e) => {
+  try {
+    const d = JSON.parse(e.data);
+    midiDevices = d.devices;
+    const sel = document.getElementById('midi-select');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">No Device</option>';
+    for (const dev of midiDevices) {
+      const opt = document.createElement('option');
+      opt.value = dev.id;
+      opt.textContent = dev.name;
+      sel.appendChild(opt);
+    }
+    if (cur) sel.value = cur;
+  } catch(e) {}
+});
+
+/* ── BPM + Tap Tempo ── */
+let tapTimes = [];
+
+document.getElementById('tap-btn').addEventListener('click', () => {
+  const now = performance.now();
+  tapTimes.push(now);
+  /* Keep last 8 taps, discard if gap > 3s */
+  if (tapTimes.length > 1 && now - tapTimes[tapTimes.length - 2] > 3000) {
+    tapTimes = [now];
+  }
+  if (tapTimes.length > 8) tapTimes.shift();
+  if (tapTimes.length >= 2) {
+    let total = 0;
+    for (let i = 1; i < tapTimes.length; i++) total += tapTimes[i] - tapTimes[i-1];
+    const avg = total / (tapTimes.length - 1);
+    const bpm = Math.round(60000 / avg);
+    document.getElementById('bpm-input').value = bpm;
+    /* BPM doesn't go into preset data — it's global runtime state */
+  }
+});
+
+document.getElementById('bpm-input').addEventListener('input', () => {
+  tapTimes = [];
+});
+
+/* ── Auto-preview ── */
+for (const id of ['step-t','gate-t','expr-n','expr-v','expr-t','expr-g','expr-frame','expr-end','offsets','levels','root-note','root-vel','seed-input']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', () => { autoSave(); simulate(); });
+}
+
+/* ── Init ── */
+loadState();
+buildPresetBar();
+applyPreset(presets[activeIdx]);
+updateChLabel();
+</script>
+</body>
+</html>

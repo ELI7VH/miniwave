@@ -3,6 +3,8 @@
 
 #include "instruments.h"
 #include "presets.h"
+#include "seq.h"
+#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -59,6 +61,8 @@ typedef struct {
     FMSynthParams live_params;
     float         volume;        /* internal volume, default 1.0 */
     float         limiter_env;   /* per-instance limiter envelope */
+    MiniSeq       seq;
+    KeySeq        keyseq;
 } FMSynth;
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -155,6 +159,18 @@ static void fm_note_off(FMSynth *s, int note) {
 
 /* ── InstrumentType interface ───────────────────────────────────────── */
 
+static void fm_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2);
+static void fm_synth_osc_handle(void *state, const char *sub_path,
+                                const int32_t *iargs, int ni,
+                                const float *fargs, int nf);
+
+static void fm_synth_param_fn(void *state, const char *name, float value) {
+    char path[64];
+    snprintf(path, sizeof(path), "/param/%s", name);
+    float fargs[1] = {value};
+    fm_synth_osc_handle(state, path, NULL, 0, fargs, 1);
+}
+
 static void fm_synth_init(void *state) {
     FMSynth *s = (FMSynth *)state;
     memset(s, 0, sizeof(*s));
@@ -162,6 +178,10 @@ static void fm_synth_init(void *state) {
     s->volume = 1.0f;
     s->limiter_env = 0.0f;
     fm_load_preset_params(s, 0);
+    seq_init(&s->seq);
+    seq_bind(&s->seq, state, fm_synth_midi, 0);
+    keyseq_init(&s->keyseq);
+    keyseq_bind(&s->keyseq, state, fm_synth_midi, fm_synth_param_fn, 0);
 }
 
 static void fm_synth_destroy(void *state) {
@@ -172,6 +192,15 @@ static void fm_synth_destroy(void *state) {
 static void fm_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     FMSynth *s = (FMSynth *)state;
     uint8_t type = status & 0xF0;
+
+    /* Key sequence intercept (skip if keyseq is calling us back) */
+    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
+        if (type == 0x90 && d2 > 0) {
+            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
+        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
+            if (keyseq_note_off(&s->keyseq, d1)) return;
+        }
+    }
 
     switch (type) {
     case 0x90: /* Note On */
@@ -204,6 +233,10 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
     FMSynth *s = (FMSynth *)state;
     const float dt = 1.0f / (float)sample_rate;
 
+    /* KeySeq cents detune → pitch multiplier */
+    float pitch_mult = (s->keyseq.cents_mod != 0.0f)
+        ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+
     /* Count active voices for headroom scaling */
     int active_count = 0;
     for (int v = 0; v < FM_MAX_VOICES; v++) {
@@ -214,6 +247,8 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
                     : 1.0f / sqrtf((float)active_count);
 
     for (int i = 0; i < frames; i++) {
+        seq_tick(&s->seq, dt);
+        keyseq_tick(&s->keyseq, dt);
         float mix = 0.0f;
 
         for (int v = 0; v < FM_MAX_VOICES; v++) {
@@ -241,6 +276,8 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
                 crf = vc->freq * p->carrier_ratio;
                 mrf = vc->freq * p->mod_ratio;
             }
+            crf *= pitch_mult;
+            mrf *= pitch_mult;
 
             vc->age += dt;
             vc->env_time += dt;
@@ -391,6 +428,9 @@ static void fm_synth_osc_handle(void *state, const char *sub_path,
             fm_load_preset_params(s, p);
             fprintf(stderr, "[fm-synth] OSC preset/load %d: %s\n", p, PRESET_NAMES[p]);
         }
+    }
+    else {
+        seq_osc_handle(&s->seq, sub_path, iargs, ni, fargs, nf);
     }
 }
 

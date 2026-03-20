@@ -2,6 +2,8 @@
 #define SUB_SYNTH_H
 
 #include "instruments.h"
+#include "seq.h"
+#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -12,7 +14,7 @@
 #endif
 
 #define SUB_TAU              (2.0f * (float)M_PI)
-#define SUB_MAX_VOICES       16
+#define SUB_MAX_VOICES       2   /* mono synth: 1 active + 1 crossfade */
 #define SUB_LIMITER_CEIL     0.95f
 #define SUB_FADEIN_SAMPLES   48
 #define SUB_FADEOUT_SAMPLES  96
@@ -69,7 +71,7 @@ typedef struct {
     float pulse_width;      /* 0.05 - 0.95 */
     float filter_cutoff;    /* Hz, 20 - 20000 */
     float filter_reso;      /* 0.0 - 1.0 */
-    float filter_env_depth; /* -1.0 to 1.0 (octaves of sweep) */
+    float filter_env_depth; /* -1.0 to 1.0 (scaled to ±8 octaves) */
     float filt_attack;
     float filt_decay;
     float filt_sustain;
@@ -86,6 +88,8 @@ typedef struct {
     SubVoice       voices[SUB_MAX_VOICES];
     SubSynthParams params;
     float          volume;
+    MiniSeq        seq;
+    KeySeq         keyseq;
 } SubSynth;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
@@ -262,29 +266,26 @@ static void sub_note_on(SubSynth *s, int note, int vel) {
     float freq = sub_midi_to_freq(note);
     float velocity = (float)vel / 127.0f;
 
-    /* Fade-out duplicate notes */
+    /* Mono: kill all active voices with crossfade */
     for (int i = 0; i < SUB_MAX_VOICES; i++) {
-        if (s->voices[i].active && s->voices[i].note == note && !s->voices[i].killing) {
+        if (s->voices[i].active && !s->voices[i].killing) {
             s->voices[i].killing = 1;
             s->voices[i].kill_pos = 0;
         }
     }
 
-    /* Find free slot */
+    /* Find free slot (crossfade voice may still be dying in slot 0) */
     int slot = -1;
     for (int i = 0; i < SUB_MAX_VOICES; i++) {
         if (!s->voices[i].active) { slot = i; break; }
     }
-    /* Steal oldest */
     if (slot < 0) {
-        float oldest = 0;
+        /* Force-kill oldest to make room */
         slot = 0;
-        for (int i = 0; i < SUB_MAX_VOICES; i++) {
-            if (s->voices[i].age > oldest) {
-                oldest = s->voices[i].age;
-                slot = i;
-            }
+        for (int i = 1; i < SUB_MAX_VOICES; i++) {
+            if (s->voices[i].age > s->voices[slot].age) slot = i;
         }
+        s->voices[slot].active = 0;
     }
 
     SubVoice *v = &s->voices[slot];
@@ -314,23 +315,39 @@ static void sub_note_off(SubSynth *s, int note) {
 
 /* ── InstrumentType interface ─────────────────────────────────────────── */
 
+static void sub_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2);
+static void sub_synth_osc_handle(void *state, const char *sub_path,
+                                  const int32_t *iargs, int ni,
+                                  const float *fargs, int nf);
+
+static void sub_synth_param_fn(void *state, const char *name, float value) {
+    char path[64];
+    snprintf(path, sizeof(path), "/param/%s", name);
+    float fargs[1] = {value};
+    sub_synth_osc_handle(state, path, NULL, 0, fargs, 1);
+}
+
 static void sub_synth_init(void *state) {
     SubSynth *s = (SubSynth *)state;
     memset(s, 0, sizeof(*s));
     s->volume = 1.0f;
     s->params.waveform = SUB_WAVE_SAW;
     s->params.pulse_width = 0.5f;
-    s->params.filter_cutoff = 8000.0f;
-    s->params.filter_reso = 0.0f;
-    s->params.filter_env_depth = 0.5f;
-    s->params.filt_attack = 0.01f;
-    s->params.filt_decay = 0.2f;
-    s->params.filt_sustain = 0.3f;
-    s->params.filt_release = 0.3f;
-    s->params.amp_attack = 0.005f;
-    s->params.amp_decay = 0.2f;
+    s->params.filter_cutoff = 2000.0f;
+    s->params.filter_reso = 0.2f;
+    s->params.filter_env_depth = 0.8f;
+    s->params.filt_attack = 0.001f;
+    s->params.filt_decay = 0.15f;
+    s->params.filt_sustain = 0.2f;
+    s->params.filt_release = 0.2f;
+    s->params.amp_attack = 0.001f;
+    s->params.amp_decay = 0.1f;
     s->params.amp_sustain = 0.8f;
-    s->params.amp_release = 0.3f;
+    s->params.amp_release = 0.15f;
+    seq_init(&s->seq);
+    seq_bind(&s->seq, state, sub_synth_midi, 0);
+    keyseq_init(&s->keyseq);
+    keyseq_bind(&s->keyseq, state, sub_synth_midi, sub_synth_param_fn, 0);
 }
 
 static void sub_synth_destroy(void *state) { (void)state; }
@@ -338,6 +355,19 @@ static void sub_synth_destroy(void *state) { (void)state; }
 static void sub_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     SubSynth *s = (SubSynth *)state;
     uint8_t type = status & 0xF0;
+
+    if (type == 0x90 && d2 > 0) {
+        fprintf(stderr, "[sub-synth] midi note=%d vel=%d keyseq(en=%d steps=%d algo=%d firing=%d)\n",
+                d1, d2, s->keyseq.enabled, s->keyseq.num_steps, s->keyseq.algo_mode, s->keyseq.firing);
+    }
+
+    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
+        if (type == 0x90 && d2 > 0) {
+            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
+        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
+            if (keyseq_note_off(&s->keyseq, d1)) return;
+        }
+    }
 
     switch (type) {
     case 0x90:
@@ -392,14 +422,15 @@ static void sub_synth_render(void *state, float *stereo_buf, int frames,
     const float dt = 1.0f / (float)sample_rate;
     const SubSynthParams *p = &s->params;
 
-    /* Polyphony headroom */
-    int active_count = 0;
-    for (int v = 0; v < SUB_MAX_VOICES; v++) {
-        if (s->voices[v].active) active_count++;
-    }
-    float poly_gain = (active_count <= 1) ? 1.0f : 1.0f / sqrtf((float)active_count);
+    /* KeySeq cents detune → pitch multiplier */
+    float pitch_mult = (s->keyseq.cents_mod != 0.0f)
+        ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+
+    /* Mono — no polyphony headroom needed */
 
     for (int i = 0; i < frames; i++) {
+        seq_tick(&s->seq, dt);
+        keyseq_tick(&s->keyseq, dt);
         float mix = 0.0f;
 
         for (int vi = 0; vi < SUB_MAX_VOICES; vi++) {
@@ -423,11 +454,14 @@ static void sub_synth_render(void *state, float *stereo_buf, int frames,
                 continue;
             }
 
-            /* Effective filter cutoff: base * 2^(depth * env * 4 octaves) */
-            float cutoff = p->filter_cutoff * powf(2.0f, p->filter_env_depth * fenv * 4.0f);
+            /* Effective filter cutoff: base * 2^(depth * env * 8 octaves) */
+            float cutoff = p->filter_cutoff * powf(2.0f, p->filter_env_depth * fenv * 8.0f);
 
-            /* Oscillator */
+            /* Oscillator (apply keyseq cents detune) */
+            float base_freq = v->freq;
+            if (pitch_mult != 1.0f) v->freq = base_freq * pitch_mult;
             float osc = sub_oscillator(v, p, dt);
+            v->freq = base_freq;
 
             /* Filter */
             float filtered = sub_svf_lp(v, osc, cutoff, p->filter_reso, sample_rate);
@@ -459,7 +493,7 @@ static void sub_synth_render(void *state, float *stereo_buf, int frames,
             mix += sample;
         }
 
-        mix *= s->volume * poly_gain;
+        mix *= s->volume;
         mix = sub_limiter(mix);
 
         stereo_buf[i * 2]     = mix;
@@ -505,6 +539,9 @@ static void sub_synth_osc_handle(void *state, const char *sub_path,
         else if (ni >= 1) {
             if (strcmp(param, "waveform") == 0) s->params.waveform = iargs[0] % SUB_WAVE_COUNT;
         }
+    }
+    else {
+        seq_osc_handle(&s->seq, sub_path, iargs, ni, fargs, nf);
     }
 }
 

@@ -2,6 +2,8 @@
 #define YM2413_H
 
 #include "instruments.h"
+#include "seq.h"
+#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -486,6 +488,10 @@ typedef struct {
     float       halfsine_table[OPLL_SINE_LEN];
     float       abssine_table[OPLL_SINE_LEN];
     float       quartersine_table[OPLL_SINE_LEN];
+
+    /* Shared step sequencer (DSL-driven) */
+    MiniSeq     mini_seq;
+    KeySeq      keyseq;
 } YM2413State;
 
 /* ── Waveform table init ──────────────────────────────────────────────── */
@@ -1056,6 +1062,18 @@ static inline float opll_drum_render_hit(OPLLDrumHit *h, float dt,
  *  INSTRUMENT TYPE INTERFACE
  * ══════════════════════════════════════════════════════════════════════════ */
 
+static void ym2413_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2);
+static void ym2413_osc_handle(void *state, const char *sub_path,
+                               const int32_t *iargs, int ni,
+                               const float *fargs, int nf);
+
+static void ym2413_param_fn(void *state, const char *name, float value) {
+    char path[64];
+    snprintf(path, sizeof(path), "/%s", name);  /* ym2413 uses /instrument, /volume etc. */
+    float fargs[1] = {value};
+    ym2413_osc_handle(state, path, NULL, 0, fargs, 1);
+}
+
 static void ym2413_init(void *state) {
     YM2413State *s = (YM2413State *)state;
     memset(s, 0, sizeof(*s));
@@ -1076,6 +1094,10 @@ static void ym2413_init(void *state) {
     s->use_yb_preset = 0;
     s->seq.bpm = OPLL_SEQ_BPM_DEFAULT;
     s->seq.playing = 0;
+    seq_init(&s->mini_seq);
+    seq_bind(&s->mini_seq, state, ym2413_midi, 0);
+    keyseq_init(&s->keyseq);
+    keyseq_bind(&s->keyseq, state, ym2413_midi, ym2413_param_fn, 0);
 
     for (int i = 0; i < OPLL_CHANNELS; i++) {
         OPLLChannel *ch = &s->channels[i];
@@ -1279,6 +1301,14 @@ static void opll_drum_trigger(YM2413State *s, int drum_type, float vel,
 static void ym2413_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     YM2413State *s = (YM2413State *)state;
     uint8_t type = status & 0xF0;
+
+    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
+        if (type == 0x90 && d2 > 0) {
+            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
+        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
+            if (keyseq_note_off(&s->keyseq, d1)) return;
+        }
+    }
 
     switch (type) {
     case 0x90: /* Note On */
@@ -1484,9 +1514,11 @@ static void ym2413_render(void *state, float *stereo_buf, int frames,
     const float porta_coeff = (s->porta_time > 0.001f)
         ? expf(-dt / s->porta_time) : 0.0f;
 
-    /* Tick key sequence (once per buffer for timing) */
+    /* Tick key sequences (once per sample for timing) */
     for (int si = 0; si < frames; si++) {
         opll_seq_tick(s, dt, sample_rate);
+        seq_tick(&s->mini_seq, dt);
+        keyseq_tick(&s->keyseq, dt);
     }
 
     /*
@@ -1643,8 +1675,10 @@ static void ym2413_render(void *state, float *stereo_buf, int frames,
                 ch->cur_freq = ch->freq;
             }
 
-            /* Apply pitch bend */
-            float base_freq = ch->cur_freq * s->pitch_bend;
+            /* Apply pitch bend + keyseq cents detune */
+            float ks_pm = (s->keyseq.cents_mod != 0.0f)
+                ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+            float base_freq = ch->cur_freq * s->pitch_bend * ks_pm;
 
             /* Mod wheel can boost mod depth */
             float mod_depth_mult = 1.0f;
@@ -2054,6 +2088,9 @@ static void ym2413_osc_handle(void *state, const char *sub_path,
     }
     else if (strcmp(sub_path, "/seq/loop") == 0 && ni >= 1) {
         s->seq.loop = iargs[0] ? 1 : 0;
+    }
+    else {
+        seq_osc_handle(&s->mini_seq, sub_path, iargs, ni, fargs, nf);
     }
 }
 
