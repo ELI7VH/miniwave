@@ -10,8 +10,6 @@
 #define FM_DRUMS_H
 
 #include "instruments.h"
-#include "seq.h"
-#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -131,8 +129,7 @@ typedef struct {
     FMDrumNote  notes[FMD_NUM_NOTES];   /* per-note drum definitions */
     int         editing_note;            /* which MIDI note is selected for editing */
     float       volume;
-    MiniSeq     seq;
-    KeySeq      keyseq;
+    float       cents_mod;              /* written by slot layer before render */
 } FMDrumState;
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
@@ -162,13 +159,6 @@ static void fmd_set_param(void *state, const char *name, float value);
 static void fmd_osc_handle(void *state, const char *sub_path,
                             const int32_t *iargs, int ni,
                             const float *fargs, int nf);
-
-static void fmd_param_fn(void *state, const char *name, float value) {
-    char path[64];
-    snprintf(path, sizeof(path), "/param/%s", name);
-    float fargs[1] = {value};
-    fmd_osc_handle(state, path, NULL, 0, fargs, 1);
-}
 
 static void fmd_init(void *state) {
     FMDrumState *s = (FMDrumState *)state;
@@ -244,8 +234,8 @@ static void fmd_render(void *state, float *stereo_buf, int frames, int sample_ra
 
             /* Pitch sweep + keyseq cents detune */
             float sweep = d->pitch_sweep * expf(-t / (d->pitch_decay + 0.0001f));
-            float pm = (s->keyseq.cents_mod != 0.0f)
-                ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+            float pm = (s->cents_mod != 0.0f)
+                ? powf(2.0f, s->cents_mod / 1200.0f) : 1.0f;
             float c_freq = (d->carrier_freq + sweep) * pm;
             float m_freq = (d->mod_freq + sweep * 0.5f) * pm;
 
@@ -328,9 +318,7 @@ static void fmd_osc_handle(void *state, const char *sub_path,
     else if (strncmp(sub_path, "/param/", 7) == 0 && nf >= 1) {
         fmd_set_param(state, sub_path + 7, fargs[0]);
     }
-    else {
-        seq_osc_handle(&s->seq, sub_path, iargs, ni, fargs, nf);
-    }
+    /* seq paths handled at slot level in server/rack */
 }
 
 static int fmd_osc_status(void *state, uint8_t *buf, int max_len) {

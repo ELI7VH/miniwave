@@ -2,8 +2,6 @@
 #define SUB_SYNTH_H
 
 #include "instruments.h"
-#include "seq.h"
-#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -88,8 +86,7 @@ typedef struct {
     SubVoice       voices[SUB_MAX_VOICES];
     SubSynthParams params;
     float          volume;
-    MiniSeq        seq;
-    KeySeq         keyseq;
+    float          cents_mod;     /* written by slot layer before render */
 } SubSynth;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
@@ -321,13 +318,6 @@ static void sub_synth_osc_handle(void *state, const char *sub_path,
                                   const int32_t *iargs, int ni,
                                   const float *fargs, int nf);
 
-static void sub_synth_param_fn(void *state, const char *name, float value) {
-    char path[64];
-    snprintf(path, sizeof(path), "/param/%s", name);
-    float fargs[1] = {value};
-    sub_synth_osc_handle(state, path, NULL, 0, fargs, 1);
-}
-
 static void sub_synth_init(void *state) {
     SubSynth *s = (SubSynth *)state;
     memset(s, 0, sizeof(*s));
@@ -407,8 +397,8 @@ static void sub_synth_render(void *state, float *stereo_buf, int frames,
     const SubSynthParams *p = &s->params;
 
     /* KeySeq cents detune → pitch multiplier */
-    float pitch_mult = (s->keyseq.cents_mod != 0.0f)
-        ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+    float pitch_mult = (s->cents_mod != 0.0f)
+        ? powf(2.0f, s->cents_mod / 1200.0f) : 1.0f;
 
     /* Mono — no polyphony headroom needed */
 
@@ -507,9 +497,7 @@ static void sub_synth_osc_handle(void *state, const char *sub_path,
             sub_synth_set_param(state, param, (float)iargs[0]);
         }
     }
-    else {
-        seq_osc_handle(&s->seq, sub_path, iargs, ni, fargs, nf);
-    }
+    /* seq paths handled at slot level in server/rack */
 }
 
 /* ── OSC status ───────────────────────────────────────────────────────── */

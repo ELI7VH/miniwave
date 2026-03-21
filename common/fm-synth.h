@@ -3,8 +3,6 @@
 
 #include "instruments.h"
 #include "presets.h"
-#include "seq.h"
-#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -61,8 +59,7 @@ typedef struct {
     FMSynthParams live_params;
     float         volume;        /* internal volume, default 1.0 */
     float         limiter_env;   /* per-instance limiter envelope */
-    MiniSeq       seq;
-    KeySeq        keyseq;
+    float         cents_mod;     /* written by slot layer before render */
 } FMSynth;
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
@@ -165,13 +162,6 @@ static void fm_synth_osc_handle(void *state, const char *sub_path,
                                 const int32_t *iargs, int ni,
                                 const float *fargs, int nf);
 
-static void fm_synth_param_fn(void *state, const char *name, float value) {
-    char path[64];
-    snprintf(path, sizeof(path), "/param/%s", name);
-    float fargs[1] = {value};
-    fm_synth_osc_handle(state, path, NULL, 0, fargs, 1);
-}
-
 static void fm_synth_init(void *state) {
     FMSynth *s = (FMSynth *)state;
     memset(s, 0, sizeof(*s));
@@ -222,8 +212,8 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
     const float dt = 1.0f / (float)sample_rate;
 
     /* KeySeq cents detune → pitch multiplier */
-    float pitch_mult = (s->keyseq.cents_mod != 0.0f)
-        ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+    float pitch_mult = (s->cents_mod != 0.0f)
+        ? powf(2.0f, s->cents_mod / 1200.0f) : 1.0f;
 
     /* Count active voices for headroom scaling */
     int active_count = 0;
@@ -398,9 +388,7 @@ static void fm_synth_osc_handle(void *state, const char *sub_path,
             fprintf(stderr, "[fm-synth] OSC preset/load %d: %s\n", p, PRESET_NAMES[p]);
         }
     }
-    else {
-        seq_osc_handle(&s->seq, sub_path, iargs, ni, fargs, nf);
-    }
+    /* seq paths handled at slot level in server/rack */
 }
 
 static int fm_synth_osc_status(void *state, uint8_t *buf, int max_len) {

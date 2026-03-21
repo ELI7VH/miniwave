@@ -2,8 +2,6 @@
 #define YM2413_H
 
 #include "instruments.h"
-#include "seq.h"
-#include "keyseq.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -489,9 +487,7 @@ typedef struct {
     float       abssine_table[OPLL_SINE_LEN];
     float       quartersine_table[OPLL_SINE_LEN];
 
-    /* Shared step sequencer (DSL-driven) */
-    MiniSeq     mini_seq;
-    KeySeq      keyseq;
+    float       cents_mod;     /* written by slot layer before render */
 } YM2413State;
 
 /* ── Waveform table init ──────────────────────────────────────────────── */
@@ -1066,13 +1062,6 @@ static void ym2413_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2);
 static void ym2413_osc_handle(void *state, const char *sub_path,
                                const int32_t *iargs, int ni,
                                const float *fargs, int nf);
-
-static void ym2413_param_fn(void *state, const char *name, float value) {
-    char path[64];
-    snprintf(path, sizeof(path), "/%s", name);  /* ym2413 uses /instrument, /volume etc. */
-    float fargs[1] = {value};
-    ym2413_osc_handle(state, path, NULL, 0, fargs, 1);
-}
 
 static void ym2413_init(void *state) {
     YM2413State *s = (YM2413State *)state;
@@ -1662,8 +1651,8 @@ static void ym2413_render(void *state, float *stereo_buf, int frames,
             }
 
             /* Apply pitch bend + keyseq cents detune */
-            float ks_pm = (s->keyseq.cents_mod != 0.0f)
-                ? powf(2.0f, s->keyseq.cents_mod / 1200.0f) : 1.0f;
+            float ks_pm = (s->cents_mod != 0.0f)
+                ? powf(2.0f, s->cents_mod / 1200.0f) : 1.0f;
             float base_freq = ch->cur_freq * s->pitch_bend * ks_pm;
 
             /* Mod wheel can boost mod depth */
@@ -2075,9 +2064,7 @@ static void ym2413_osc_handle(void *state, const char *sub_path,
     else if (strcmp(sub_path, "/seq/loop") == 0 && ni >= 1) {
         s->seq.loop = iargs[0] ? 1 : 0;
     }
-    else {
-        seq_osc_handle(&s->mini_seq, sub_path, iargs, ni, fargs, nf);
-    }
+    /* seq paths handled at slot level in server/rack */
 }
 
 /* ── OSC status ───────────────────────────────────────────────────────── */

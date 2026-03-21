@@ -24,6 +24,8 @@
 #include "osc.h"
 #include "json-helpers.h"
 #include "instruments.h"
+#include "seq.h"
+#include "keyseq.h"
 #include "fm-synth.h"
 #include "ym2413.h"
 #include "sub-synth.h"
@@ -501,15 +503,13 @@ static void render_mix(float *mix_buf, float *slot_buf, int frames, int sample_r
             if (slot->keyseq) keyseq_tick(slot->keyseq, tick_dt);
         }
 
-        /* Bridge: copy slot keyseq cents_mod into slot for instruments to read.
-         * Instruments currently read their embedded keyseq.cents_mod — copy there too. */
+        /* Copy slot keyseq cents_mod → instrument's cents_mod field */
         if (slot->keyseq) {
             slot->cents_mod = slot->keyseq->cents_mod;
-            /* Temporary: write to embedded keyseq.cents_mod so instruments can read it */
-            if (strcmp(itype->name, "fm-synth") == 0) ((FMSynth *)st)->keyseq.cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "sub-synth") == 0) ((SubSynth *)st)->keyseq.cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "ym2413") == 0) ((YM2413State *)st)->keyseq.cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "fm-drums") == 0) ((FMDrumState *)st)->keyseq.cents_mod = slot->cents_mod;
+            if (strcmp(itype->name, "fm-synth") == 0) ((FMSynth *)st)->cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "sub-synth") == 0) ((SubSynth *)st)->cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "ym2413") == 0) ((YM2413State *)st)->cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "fm-drums") == 0) ((FMDrumState *)st)->cents_mod = slot->cents_mod;
         }
 
         memset(slot_buf, 0, sizeof(float) * (size_t)(frames * CHANNELS));
