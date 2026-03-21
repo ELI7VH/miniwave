@@ -39,7 +39,7 @@ typedef struct {
     int   velocity;         /* 1-127 */
 } SeqNote;
 
-typedef struct {
+typedef struct MiniSeq {
     SeqNote  notes[SEQ_MAX_NOTES];
     int      num_notes;
     int      current_note;      /* playback cursor */

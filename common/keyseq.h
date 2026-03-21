@@ -388,7 +388,7 @@ typedef struct {
  *  KeySeq struct
  * ══════════════════════════════════════════════════════════════════════════ */
 
-typedef struct {
+typedef struct KeySeq {
     /* Offsets mode */
     int   offsets[KEYSEQ_MAX_STEPS];
     float levels[KEYSEQ_MAX_STEPS];
