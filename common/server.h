@@ -620,20 +620,27 @@ static void http_handle_api(int fd, const char *body) {
         json_get_int(body, "channel", &ch);
         json_get_int(body, "note", &note);
         json_get_int(body, "velocity", &vel);
-        /* Route through midi_dispatch_raw so keyseq intercept works */
-        uint8_t msg[3] = { (uint8_t)(0x90 | (ch & 0x0F)), (uint8_t)note, (uint8_t)vel };
-        midi_dispatch_raw(msg, 3);
-        mcast_note_on(ch, note, vel);
-        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        if (ch < 0 || ch >= MAX_SLOTS || note < 0 || note > 127) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"invalid channel or note\"}");
+        } else {
+            uint8_t msg[3] = { (uint8_t)(0x90 | ch), (uint8_t)note, (uint8_t)vel };
+            midi_dispatch_raw(msg, 3);
+            mcast_note_on(ch, note, vel);
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
     }
     else if (strcmp(type_str, "note_off") == 0) {
         int ch = 0, note = 60;
         json_get_int(body, "channel", &ch);
         json_get_int(body, "note", &note);
-        uint8_t msg[3] = { (uint8_t)(0x80 | (ch & 0x0F)), (uint8_t)note, 0 };
-        midi_dispatch_raw(msg, 3);
-        mcast_note_off(ch, note);
-        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        if (ch < 0 || ch >= MAX_SLOTS || note < 0 || note > 127) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"invalid channel or note\"}");
+        } else {
+            uint8_t msg[3] = { (uint8_t)(0x80 | ch), (uint8_t)note, 0 };
+            midi_dispatch_raw(msg, 3);
+            mcast_note_off(ch, note);
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
     }
     else if (strcmp(type_str, "midi_device") == 0) {
         char dev[64] = "";
@@ -1246,13 +1253,15 @@ static void *http_thread_fn(void *arg) {
                     http_send_sse_headers(client_fd);
 
                     int registered = 0;
+                    int assigned_cid = 0;
                     pthread_mutex_lock(&g_http_lock);
                     for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
                         if (g_http_clients[i].fd < 0) {
                             g_http_clients[i].fd = client_fd;
                             g_http_clients[i].is_sse = 1;
                             g_http_clients[i].detail_channel = -1;
-                            g_http_clients[i].client_id = g_next_client_id++;
+                            assigned_cid = g_next_client_id++;
+                            g_http_clients[i].client_id = assigned_cid;
                             registered = 1;
                             break;
                         }
@@ -1265,7 +1274,7 @@ static void *http_thread_fn(void *arg) {
                         char json[SSE_BUF_SIZE];
 
                         /* Send client_id so /api/detail can target this client */
-                        int cid = g_next_client_id - 1;
+                        int cid = assigned_cid;
                         snprintf(json, sizeof(json), "{\"client_id\":%d}", cid);
                         sse_send_event(client_fd, "hello", json);
 
@@ -1283,7 +1292,9 @@ static void *http_thread_fn(void *arg) {
                     const char *body = strstr(reqbuf, "\r\n\r\n");
                     if (body) {
                         body += 4;
+                        slot_read_begin();
                         http_handle_api(client_fd, body);
+                        slot_read_end();
                     } else {
                         http_send_response(client_fd, 400, "application/json",
                                            "{\"error\":\"no body\"}", 18);
@@ -1334,8 +1345,10 @@ static void *http_thread_fn(void *arg) {
                                (now.tv_nsec - last_rack_poll.tv_nsec) / 1000000;
         if (rack_elapsed_ms >= 500) {
             last_rack_poll = now;
+            slot_read_begin();
             char json[SSE_BUF_SIZE];
             build_rack_status_json(json, (int)sizeof(json));
+            slot_read_end();
             sse_broadcast("rack_status", json);
         }
 
@@ -1355,8 +1368,10 @@ static void *http_thread_fn(void *arg) {
             pthread_mutex_unlock(&g_http_lock);
 
             if (detail_ch >= 0 && detail_ch < MAX_SLOTS) {
+                slot_read_begin();
                 char json[SSE_BUF_SIZE];
                 build_ch_status_json(detail_ch, json, (int)sizeof(json));
+                slot_read_end();
                 sse_broadcast("ch_status", json);
             }
         }

@@ -137,7 +137,17 @@ static void deferred_free_push(void *ptr, void (*destroy)(void *)) {
     }
 }
 
+/* Reader count — HTTP/SSE handlers increment while reading slot state.
+ * deferred_free_drain waits for readers to clear before freeing. */
+static _Atomic int g_slot_readers = 0;
+
+static inline void slot_read_begin(void) { atomic_fetch_add(&g_slot_readers, 1); }
+static inline void slot_read_end(void)   { atomic_fetch_sub(&g_slot_readers, 1); }
+
 static void deferred_free_drain(void) {
+    /* Don't free while HTTP handlers are reading slot state */
+    if (atomic_load(&g_slot_readers) > 0) return;
+
     int count = atomic_exchange(&g_deferred_free_count, 0);
     for (int i = 0; i < count && i < DEFERRED_FREE_MAX; i++) {
         DeferredFree *df = &g_deferred_free[i];
@@ -390,6 +400,12 @@ static void state_save(void) {
                 json_escape(esc, sizeof(esc), slot->keyseq->source);
                 fprintf(f, ",\"keyseq_dsl\":\"%s\"", esc);
             }
+            /* Save slot-level seq DSL */
+            if (slot->seq && slot->seq->source[0]) {
+                char esc[1024];
+                json_escape(esc, sizeof(esc), slot->seq->source);
+                fprintf(f, ",\"seq_dsl\":\"%s\"", esc);
+            }
         }
 
         fprintf(f, "}%s\n", (i < MAX_SLOTS - 1) ? "," : "");
@@ -466,6 +482,11 @@ static void state_load(void) {
                 char ks_dsl[512] = "";
                 if (slot->keyseq && json_get_string(slot_json, "keyseq_dsl", ks_dsl, sizeof(ks_dsl)) == 0 && ks_dsl[0]) {
                     keyseq_parse(slot->keyseq, ks_dsl);
+                }
+                /* Restore slot-level seq DSL */
+                char seq_dsl[512] = "";
+                if (slot->seq && json_get_string(slot_json, "seq_dsl", seq_dsl, sizeof(seq_dsl)) == 0 && seq_dsl[0]) {
+                    seq_parse(slot->seq, seq_dsl);
                 }
             }
         }
