@@ -172,12 +172,7 @@ static int build_midi_devices_json(char *buf, int max) {
 static int append_keyseq_to_ch_status(int ch, char *buf, int pos, int max) {
     RackSlot *slot = &g_rack.slots[ch];
     if (!slot->active || !slot->state) return pos;
-    const char *tname = g_type_registry[slot->type_idx]->name;
-    KeySeq *ks = NULL;
-    if (strcmp(tname, "fm-synth") == 0) ks = &((FMSynth *)slot->state)->keyseq;
-    else if (strcmp(tname, "sub-synth") == 0) ks = &((SubSynth *)slot->state)->keyseq;
-    else if (strcmp(tname, "ym2413") == 0) ks = &((YM2413State *)slot->state)->keyseq;
-    else if (strcmp(tname, "fm-drums") == 0) ks = &((FMDrumState *)slot->state)->keyseq;
+    KeySeq *ks = slot->keyseq;
     if (ks) {
         char esc[256];
         json_escape(esc, sizeof(esc), ks->source);
@@ -502,12 +497,7 @@ static void keyseq_wire_graph_broadcast(void) {
     for (int i = 0; i < MAX_SLOTS; i++) {
         RackSlot *slot = &g_rack.slots[i];
         if (!slot->active || !slot->state) continue;
-        const char *tname = g_type_registry[slot->type_idx]->name;
-        KeySeq *ks = NULL;
-        if (strcmp(tname, "fm-synth") == 0) ks = &((FMSynth *)slot->state)->keyseq;
-        else if (strcmp(tname, "sub-synth") == 0) ks = &((SubSynth *)slot->state)->keyseq;
-        else if (strcmp(tname, "ym2413") == 0) ks = &((YM2413State *)slot->state)->keyseq;
-        else if (strcmp(tname, "fm-drums") == 0) ks = &((FMDrumState *)slot->state)->keyseq;
+        KeySeq *ks = slot->keyseq;
         if (ks) ks->graph_fn = keyseq_graph_broadcast;
     }
 }
@@ -638,7 +628,12 @@ static void http_handle_api(int fd, const char *body) {
                     nf = 1;
                 }
 
-                itype->osc_handle(slot->state, path, iargs, ni, fargs, nf);
+                /* Intercept seq paths — route to slot-level seq */
+                if (strncmp(path, "/seq/", 5) == 0 || strcmp(path, "/seq") == 0) {
+                    if (slot->seq) seq_osc_handle(slot->seq, path, iargs, ni, fargs, nf);
+                } else {
+                    itype->osc_handle(slot->state, path, iargs, ni, fargs, nf);
+                }
                 state_mark_dirty();
             }
         }
@@ -698,24 +693,9 @@ static void http_handle_api(int fd, const char *body) {
 
         if (ch >= 0 && ch < MAX_SLOTS && dsl[0]) {
             RackSlot *slot = &g_rack.slots[ch];
-            if (slot->active && slot->state) {
-                MiniSeq *mseq = NULL;
-                const char *tname = g_type_registry[slot->type_idx]->name;
-                if (strcmp(tname, "fm-synth") == 0)
-                    mseq = &((FMSynth *)slot->state)->seq;
-                else if (strcmp(tname, "sub-synth") == 0)
-                    mseq = &((SubSynth *)slot->state)->seq;
-                else if (strcmp(tname, "ym2413") == 0)
-                    mseq = &((YM2413State *)slot->state)->mini_seq;
-                else if (strcmp(tname, "fm-drums") == 0)
-                    mseq = &((FMDrumState *)slot->state)->seq;
-
-                if (mseq) {
-                    seq_handle_dsl(mseq, dsl);
-                    rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
-                } else {
-                    rlen = snprintf(resp, sizeof(resp), "{\"error\":\"no seq\"}");
-                }
+            if (slot->active && slot->state && slot->seq) {
+                seq_handle_dsl(slot->seq, dsl);
+                rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
             } else {
                 rlen = snprintf(resp, sizeof(resp), "{\"error\":\"no instrument\"}");
             }
@@ -728,18 +708,8 @@ static void http_handle_api(int fd, const char *body) {
         json_get_int(body, "channel", &ch);
         if (ch >= 0 && ch < MAX_SLOTS) {
             RackSlot *slot = &g_rack.slots[ch];
-            if (slot->active && slot->state) {
-                MiniSeq *mseq = NULL;
-                const char *tname = g_type_registry[slot->type_idx]->name;
-                if (strcmp(tname, "fm-synth") == 0)
-                    mseq = &((FMSynth *)slot->state)->seq;
-                else if (strcmp(tname, "sub-synth") == 0)
-                    mseq = &((SubSynth *)slot->state)->seq;
-                else if (strcmp(tname, "ym2413") == 0)
-                    mseq = &((YM2413State *)slot->state)->mini_seq;
-                else if (strcmp(tname, "fm-drums") == 0)
-                    mseq = &((FMDrumState *)slot->state)->seq;
-                if (mseq) seq_stop(mseq);
+            if (slot->active && slot->seq) {
+                seq_stop(slot->seq);
             }
         }
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
@@ -752,25 +722,10 @@ static void http_handle_api(int fd, const char *body) {
 
         if (ch >= 0 && ch < MAX_SLOTS && dsl[0]) {
             RackSlot *slot = &g_rack.slots[ch];
-            if (slot->active && slot->state) {
-                KeySeq *ks = NULL;
-                const char *tname = g_type_registry[slot->type_idx]->name;
-                if (strcmp(tname, "fm-synth") == 0)
-                    ks = &((FMSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "sub-synth") == 0)
-                    ks = &((SubSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "ym2413") == 0)
-                    ks = &((YM2413State *)slot->state)->keyseq;
-                else if (strcmp(tname, "fm-drums") == 0)
-                    ks = &((FMDrumState *)slot->state)->keyseq;
-
-                if (ks) {
-                    keyseq_parse(ks, dsl);
-                    rlen = snprintf(resp, sizeof(resp),
-                        "{\"ok\":true,\"steps\":%d}", ks->num_steps);
-                } else {
-                    rlen = snprintf(resp, sizeof(resp), "{\"error\":\"no keyseq\"}");
-                }
+            if (slot->active && slot->keyseq) {
+                keyseq_parse(slot->keyseq, dsl);
+                rlen = snprintf(resp, sizeof(resp),
+                    "{\"ok\":true,\"steps\":%d}", slot->keyseq->num_steps);
             } else {
                 rlen = snprintf(resp, sizeof(resp), "{\"error\":\"no instrument\"}");
             }
@@ -783,18 +738,9 @@ static void http_handle_api(int fd, const char *body) {
         json_get_int(body, "channel", &ch);
         if (ch >= 0 && ch < MAX_SLOTS) {
             RackSlot *slot = &g_rack.slots[ch];
-            if (slot->active && slot->state) {
-                KeySeq *ks = NULL;
-                const char *tname = g_type_registry[slot->type_idx]->name;
-                if (strcmp(tname, "fm-synth") == 0)
-                    ks = &((FMSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "sub-synth") == 0)
-                    ks = &((SubSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "ym2413") == 0)
-                    ks = &((YM2413State *)slot->state)->keyseq;
-                else if (strcmp(tname, "fm-drums") == 0)
-                    ks = &((FMDrumState *)slot->state)->keyseq;
-                if (ks) { keyseq_stop(ks); ks->enabled = 0; }
+            if (slot->active && slot->keyseq) {
+                keyseq_stop(slot->keyseq);
+                slot->keyseq->enabled = 0;
             }
         }
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
@@ -961,11 +907,7 @@ static void http_handle_api(int fd, const char *body) {
                 pos += snprintf(sbuf + pos, (size_t)(SPEC_BUF_SIZE - pos), "]");
 
                 /* KeySeq state */
-                KeySeq *ks = NULL;
-                if (strcmp(tname, "fm-synth") == 0) ks = &((FMSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "sub-synth") == 0) ks = &((SubSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "ym2413") == 0) ks = &((YM2413State *)slot->state)->keyseq;
-                else if (strcmp(tname, "fm-drums") == 0) ks = &((FMDrumState *)slot->state)->keyseq;
+                KeySeq *ks = slot->keyseq;
                 if (ks) {
                     char esc_dsl[512];
                     json_escape(esc_dsl, sizeof(esc_dsl), ks->source);
@@ -994,14 +936,7 @@ static void http_handle_api(int fd, const char *body) {
         json_get_int(body, "channel", &ch);
         if (ch >= 0 && ch < MAX_SLOTS) {
             RackSlot *slot = &g_rack.slots[ch];
-            KeySeq *ks = NULL;
-            if (slot->active && slot->state) {
-                const char *tname = g_type_registry[slot->type_idx]->name;
-                if (strcmp(tname, "fm-synth") == 0) ks = &((FMSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "sub-synth") == 0) ks = &((SubSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "ym2413") == 0) ks = &((YM2413State *)slot->state)->keyseq;
-                else if (strcmp(tname, "fm-drums") == 0) ks = &((FMDrumState *)slot->state)->keyseq;
-            }
+            KeySeq *ks = (slot->active) ? slot->keyseq : NULL;
             if (ks) {
                 char esc[512];
                 json_escape(esc, sizeof(esc), ks->source);
@@ -1031,14 +966,7 @@ static void http_handle_api(int fd, const char *body) {
             rlen = snprintf(resp, sizeof(resp), "{\"error\":\"bad channel\"}");
         } else {
             RackSlot *slot = &g_rack.slots[ch];
-            KeySeq *ks = NULL;
-            if (slot->active && slot->state) {
-                const char *tname = g_type_registry[slot->type_idx]->name;
-                if (strcmp(tname, "fm-synth") == 0) ks = &((FMSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "sub-synth") == 0) ks = &((SubSynth *)slot->state)->keyseq;
-                else if (strcmp(tname, "ym2413") == 0) ks = &((YM2413State *)slot->state)->keyseq;
-                else if (strcmp(tname, "fm-drums") == 0) ks = &((FMDrumState *)slot->state)->keyseq;
-            }
+            KeySeq *ks = (slot->active) ? slot->keyseq : NULL;
 
             if (!ks || !ks->enabled || (!ks->num_steps && !ks->algo_mode)) {
                 rlen = snprintf(resp, sizeof(resp),
@@ -1176,13 +1104,7 @@ static void http_handle_api(int fd, const char *body) {
             itype->midi(slot->state, status, 123, 0);
 
             /* Stop keyseq */
-            KeySeq *ks = NULL;
-            const char *tname = itype->name;
-            if (strcmp(tname, "fm-synth") == 0) ks = &((FMSynth *)slot->state)->keyseq;
-            else if (strcmp(tname, "sub-synth") == 0) ks = &((SubSynth *)slot->state)->keyseq;
-            else if (strcmp(tname, "ym2413") == 0) ks = &((YM2413State *)slot->state)->keyseq;
-            else if (strcmp(tname, "fm-drums") == 0) ks = &((FMDrumState *)slot->state)->keyseq;
-            if (ks) keyseq_stop(ks);
+            if (slot->keyseq) keyseq_stop(slot->keyseq);
         }
         fprintf(stderr, "[miniwave] PANIC — all notes off, all keyseqs stopped\n");
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
@@ -1791,6 +1713,9 @@ static void *osc_thread_fn(void *arg) {
                             sendto(sock, reply, (size_t)rlen, 0,
                                    (struct sockaddr *)&sender, sender_len);
                         }
+                    } else if (strncmp(sub_path, "/seq/", 5) == 0 || strcmp(sub_path, "/seq") == 0) {
+                        /* Route seq paths to slot-level seq */
+                        if (slot->seq) seq_osc_handle(slot->seq, sub_path, arg_i, ai, arg_f, afi);
                     } else {
                         InstrumentType *itype = g_type_registry[slot->type_idx];
                         itype->osc_handle(slot->state, sub_path,

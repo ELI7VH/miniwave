@@ -179,10 +179,6 @@ static void fm_synth_init(void *state) {
     s->volume = 1.0f;
     s->limiter_env = 0.0f;
     fm_load_preset_params(s, 0);
-    seq_init(&s->seq);
-    seq_bind(&s->seq, state, fm_synth_midi, 0);
-    keyseq_init(&s->keyseq);
-    keyseq_bind(&s->keyseq, state, fm_synth_midi, fm_synth_param_fn, 0);
 }
 
 static void fm_synth_destroy(void *state) {
@@ -193,15 +189,6 @@ static void fm_synth_destroy(void *state) {
 static void fm_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     FMSynth *s = (FMSynth *)state;
     uint8_t type = status & 0xF0;
-
-    /* Key sequence intercept (skip if keyseq is calling us back) */
-    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
-        if (type == 0x90 && d2 > 0) {
-            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
-        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
-            if (keyseq_note_off(&s->keyseq, d1)) return;
-        }
-    }
 
     switch (type) {
     case 0x90: /* Note On */

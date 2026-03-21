@@ -193,12 +193,32 @@ static int rack_set_slot(int channel, const char *type_name) {
      * Audio buffer at 48kHz/1024 = ~21ms max. 50ms is safe. */
     usleep(50000);
 
+    /* Free old slot-level seq/keyseq */
+    MiniSeq *old_seq = slot->seq;
+    KeySeq  *old_keyseq = slot->keyseq;
+
     /* Swap in new instrument (slot is inactive, no concurrent readers) */
     slot->state = new_state;
     slot->type_idx = tidx;
     slot->volume = 1.0f;
     slot->mute = 0;
     slot->solo = 0;
+    slot->cents_mod = 0.0f;
+
+    /* Allocate slot-level seq and keyseq */
+    slot->seq = calloc(1, sizeof(MiniSeq));
+    slot->keyseq = calloc(1, sizeof(KeySeq));
+    if (slot->seq) {
+        seq_init(slot->seq);
+        seq_bind(slot->seq, new_state, itype->midi, (uint8_t)(channel & 0x0F));
+    }
+    if (slot->keyseq) {
+        keyseq_init(slot->keyseq);
+        keyseq_bind(slot->keyseq, new_state, itype->midi,
+                     itype->set_param ? itype->set_param : NULL,
+                     (uint8_t)(channel & 0x0F));
+    }
+
     atomic_fetch_add(&slot->gen, 1);
     atomic_store(&slot->active, 1);
 
@@ -208,6 +228,8 @@ static int rack_set_slot(int channel, const char *type_name) {
         old_type->destroy(old_state);
         free(old_state);
     }
+    free(old_seq);
+    free(old_keyseq);
 
     fprintf(stderr, "[miniwave] slot %d = %s\n", channel, itype->display_name);
     state_mark_dirty();
@@ -226,17 +248,25 @@ static void rack_clear_slot(int channel) {
     atomic_fetch_add(&slot->gen, 1);
     usleep(50000);
 
+    MiniSeq *old_seq = slot->seq;
+    KeySeq  *old_keyseq = slot->keyseq;
+
     slot->state = NULL;
     slot->type_idx = -1;
     slot->volume = 1.0f;
     slot->mute = 0;
     slot->solo = 0;
+    slot->seq = NULL;
+    slot->keyseq = NULL;
+    slot->cents_mod = 0.0f;
 
     if (was_active && old_state && old_type_idx >= 0) {
         InstrumentType *itype = g_type_registry[old_type_idx];
         itype->destroy(old_state);
         free(old_state);
     }
+    free(old_seq);
+    free(old_keyseq);
 
     fprintf(stderr, "[miniwave] slot %d cleared\n", channel);
     state_mark_dirty();
@@ -400,6 +430,22 @@ static inline void midi_dispatch_raw(const uint8_t *data, int len) {
     uint8_t type = status & 0xF0;
     uint8_t d1 = (len > 1) ? data[1] : 0;
     uint8_t d2 = (len > 2) ? data[2] : 0;
+
+    /* Slot-level keyseq intercept — catches notes before instrument sees them */
+    KeySeq *ks = slot->keyseq;
+    if (ks && !ks->firing && ks->enabled && ks->num_steps > 0) {
+        if (type == 0x90 && d2 > 0) {
+            if (keyseq_note_on(ks, d1, d2)) {
+                if (g_midi_broadcast) g_midi_broadcast(ch, d1, d2, 1);
+                return;
+            }
+        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
+            if (keyseq_note_off(ks, d1)) {
+                if (g_midi_broadcast) g_midi_broadcast(ch, d1, 0, 0);
+                return;
+            }
+        }
+    }
 
     switch (type) {
     case 0x90:

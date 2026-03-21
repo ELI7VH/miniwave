@@ -181,10 +181,6 @@ static void fmd_init(void *state) {
     /* Pre-init the standard GM drum notes */
     for (int n = 35; n <= 61; n++)
         fmd_ensure_note(s, n);
-    seq_init(&s->seq);
-    seq_bind(&s->seq, state, fmd_midi, 9);
-    keyseq_init(&s->keyseq);
-    keyseq_bind(&s->keyseq, state, fmd_midi, fmd_param_fn, 9);
 }
 
 static void fmd_destroy(void *state) { (void)state; }
@@ -192,14 +188,6 @@ static void fmd_destroy(void *state) { (void)state; }
 static void fmd_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     FMDrumState *s = (FMDrumState *)state;
     uint8_t type = status & 0xF0;
-
-    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
-        if (type == 0x90 && d2 > 0) {
-            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
-        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
-            if (keyseq_note_off(&s->keyseq, d1)) return;
-        }
-    }
 
     if (type == 0x90 && d2 > 0) {
         int note = d1;

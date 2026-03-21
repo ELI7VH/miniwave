@@ -345,10 +345,6 @@ static void sub_synth_init(void *state) {
     s->params.amp_decay = 0.1f;
     s->params.amp_sustain = 0.8f;
     s->params.amp_release = 0.15f;
-    seq_init(&s->seq);
-    seq_bind(&s->seq, state, sub_synth_midi, 0);
-    keyseq_init(&s->keyseq);
-    keyseq_bind(&s->keyseq, state, sub_synth_midi, sub_synth_param_fn, 0);
 }
 
 static void sub_synth_destroy(void *state) { (void)state; }
@@ -356,19 +352,6 @@ static void sub_synth_destroy(void *state) { (void)state; }
 static void sub_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     SubSynth *s = (SubSynth *)state;
     uint8_t type = status & 0xF0;
-
-    if (type == 0x90 && d2 > 0) {
-        fprintf(stderr, "[sub-synth] midi note=%d vel=%d keyseq(en=%d steps=%d algo=%d firing=%d)\n",
-                d1, d2, s->keyseq.enabled, s->keyseq.num_steps, s->keyseq.algo_mode, s->keyseq.firing);
-    }
-
-    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
-        if (type == 0x90 && d2 > 0) {
-            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
-        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
-            if (keyseq_note_off(&s->keyseq, d1)) return;
-        }
-    }
 
     switch (type) {
     case 0x90:

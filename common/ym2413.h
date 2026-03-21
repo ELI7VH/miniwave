@@ -1094,10 +1094,6 @@ static void ym2413_init(void *state) {
     s->use_yb_preset = 0;
     s->seq.bpm = OPLL_SEQ_BPM_DEFAULT;
     s->seq.playing = 0;
-    seq_init(&s->mini_seq);
-    seq_bind(&s->mini_seq, state, ym2413_midi, 0);
-    keyseq_init(&s->keyseq);
-    keyseq_bind(&s->keyseq, state, ym2413_midi, ym2413_param_fn, 0);
 
     for (int i = 0; i < OPLL_CHANNELS; i++) {
         OPLLChannel *ch = &s->channels[i];
@@ -1301,14 +1297,6 @@ static void opll_drum_trigger(YM2413State *s, int drum_type, float vel,
 static void ym2413_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     YM2413State *s = (YM2413State *)state;
     uint8_t type = status & 0xF0;
-
-    if (!s->keyseq.firing && s->keyseq.enabled && s->keyseq.num_steps > 0) {
-        if (type == 0x90 && d2 > 0) {
-            if (keyseq_note_on(&s->keyseq, d1, d2)) return;
-        } else if (type == 0x80 || (type == 0x90 && d2 == 0)) {
-            if (keyseq_note_off(&s->keyseq, d1)) return;
-        }
-    }
 
     switch (type) {
     case 0x90: /* Note On */
