@@ -222,8 +222,13 @@ static const char *OSC_SPEC_JSON =
 /* ── HTTP response helpers ─────────────────────────────────────────── */
 
 static inline ssize_t http_write(int fd, const void *buf, size_t len) {
-    ssize_t r = write(fd, buf, len);
-    return r;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t r = write(fd, (const char *)buf + sent, len - sent);
+        if (r <= 0) return r;
+        sent += (size_t)r;
+    }
+    return (ssize_t)sent;
 }
 
 static void http_send_response(int fd, int status, const char *content_type,
