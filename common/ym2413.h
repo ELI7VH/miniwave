@@ -339,7 +339,21 @@ static void ym2413_set_param(void *state, const char *name, float value) {
     int iv = (int)value;
 
     if (strcmp(name, "instrument") == 0) {
-        if (iv >= 0 && iv < 16) s->current_instrument = iv;
+        if (iv >= 0 && iv < 16) {
+            s->current_instrument = iv;
+            /* Copy ROM patch params into custom registers (0x00-0x07)
+             * so they're editable. Switch to instrument 0 (custom). */
+            if (iv > 0) {
+                OPLL_PATCH pair[2]; /* [0]=mod, [1]=car */
+                OPLL_getDefaultPatch(OPLL_2413_TONE, iv, pair);
+                e_uint8 dump[8];
+                OPLL_patch2dump(pair, dump);
+                for (int r = 0; r < 8; r++)
+                    OPLL_writeReg(s->opll, (e_uint32)r, dump[r]);
+                OPLL_forceRefresh(s->opll);
+            }
+            s->current_instrument = 0;
+        }
     }
     else if (strcmp(name, "volume") == 0) {
         s->volume = value < 0 ? 0 : value > 1 ? 1 : value;
