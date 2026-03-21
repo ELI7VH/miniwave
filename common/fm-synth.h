@@ -235,8 +235,6 @@ static void fm_synth_render(void *state, float *stereo_buf, int frames, int samp
                     : 1.0f / sqrtf((float)active_count);
 
     for (int i = 0; i < frames; i++) {
-        seq_tick(&s->seq, dt);
-        keyseq_tick(&s->keyseq, dt);
         float mix = 0.0f;
 
         for (int v = 0; v < FM_MAX_VOICES; v++) {

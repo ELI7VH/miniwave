@@ -229,8 +229,6 @@ static void fmd_render(void *state, float *stereo_buf, int frames, int sample_ra
     const float dt = 1.0f / (float)sample_rate;
 
     for (int i = 0; i < frames; i++) {
-        seq_tick(&s->seq, dt);
-        keyseq_tick(&s->keyseq, dt);
         float mix = 0.0f;
 
         for (int vi = 0; vi < FMD_MAX_VOICES; vi++) {

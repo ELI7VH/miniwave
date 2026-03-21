@@ -1502,11 +1502,9 @@ static void ym2413_render(void *state, float *stereo_buf, int frames,
     const float porta_coeff = (s->porta_time > 0.001f)
         ? expf(-dt / s->porta_time) : 0.0f;
 
-    /* Tick key sequences (once per sample for timing) */
+    /* Tick OPLL internal key sequence (not the slot-level seq/keyseq) */
     for (int si = 0; si < frames; si++) {
         opll_seq_tick(s, dt, sample_rate);
-        seq_tick(&s->mini_seq, dt);
-        keyseq_tick(&s->keyseq, dt);
     }
 
     /*

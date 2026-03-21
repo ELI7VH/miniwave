@@ -492,6 +492,26 @@ static void render_mix(float *mix_buf, float *slot_buf, int frames, int sample_r
         if (any_solo && !slot->solo) continue;
 
         InstrumentType *itype = g_type_registry[slot->type_idx];
+
+        /* Tick slot-level seq/keyseq per-sample before rendering.
+         * Events fire at buffer boundaries (acceptable latency). */
+        float tick_dt = 1.0f / (float)sample_rate;
+        for (int si = 0; si < frames; si++) {
+            if (slot->seq) seq_tick(slot->seq, tick_dt);
+            if (slot->keyseq) keyseq_tick(slot->keyseq, tick_dt);
+        }
+
+        /* Bridge: copy slot keyseq cents_mod into slot for instruments to read.
+         * Instruments currently read their embedded keyseq.cents_mod — copy there too. */
+        if (slot->keyseq) {
+            slot->cents_mod = slot->keyseq->cents_mod;
+            /* Temporary: write to embedded keyseq.cents_mod so instruments can read it */
+            if (strcmp(itype->name, "fm-synth") == 0) ((FMSynth *)st)->keyseq.cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "sub-synth") == 0) ((SubSynth *)st)->keyseq.cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "ym2413") == 0) ((YM2413State *)st)->keyseq.cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "fm-drums") == 0) ((FMDrumState *)st)->keyseq.cents_mod = slot->cents_mod;
+        }
+
         memset(slot_buf, 0, sizeof(float) * (size_t)(frames * CHANNELS));
         itype->render(st, slot_buf, frames, sample_rate);
 

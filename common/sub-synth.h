@@ -413,8 +413,6 @@ static void sub_synth_render(void *state, float *stereo_buf, int frames,
     /* Mono — no polyphony headroom needed */
 
     for (int i = 0; i < frames; i++) {
-        seq_tick(&s->seq, dt);
-        keyseq_tick(&s->keyseq, dt);
         float mix = 0.0f;
 
         for (int vi = 0; vi < SUB_MAX_VOICES; vi++) {
