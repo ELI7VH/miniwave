@@ -860,7 +860,23 @@ static void http_handle_api(int fd, const char *body) {
             "{\"note\":46,\"label\":\"OH\"},{\"note\":47,\"label\":\"Tom\"},"
             "{\"note\":48,\"label\":\"Tom\"},{\"note\":49,\"label\":\"Cymbal\"},"
             "{\"note\":50,\"label\":\"Tom\"},{\"note\":51,\"label\":\"Cymbal\"}"
-            "]}");
+            "]},");
+
+        /* ── additive schema ── */
+        pos += snprintf(sbuf + pos, (size_t)(SPEC_BUF_SIZE - pos),
+            "\"additive\":{\"params\":["
+            "{\"name\":\"mode\",\"min\":0,\"max\":2,\"default\":0,\"type\":\"int\",\"labels\":[\"Harmonic\",\"Partial\",\"Cluster\"]},"
+            "{\"name\":\"harmonics\",\"min\":1,\"max\":64,\"default\":16,\"type\":\"int\"},"
+            "{\"name\":\"volume\",\"min\":0,\"max\":1,\"default\":1,\"type\":\"float\"},"
+            "{\"name\":\"attack\",\"min\":0.001,\"max\":2,\"default\":0.01,\"type\":\"float\"},"
+            "{\"name\":\"decay\",\"min\":0.001,\"max\":3,\"default\":0.1,\"type\":\"float\"},"
+            "{\"name\":\"sustain\",\"min\":0,\"max\":1,\"default\":0.7,\"type\":\"float\"},"
+            "{\"name\":\"release\",\"min\":0.001,\"max\":4,\"default\":0.3,\"type\":\"float\"},"
+            "{\"name\":\"ratio\",\"min\":0.5,\"max\":4,\"default\":1.5,\"type\":\"float\",\"group\":\"cluster\"},"
+            "{\"name\":\"spread\",\"min\":0,\"max\":2,\"default\":0,\"type\":\"float\",\"group\":\"cluster\"},"
+            "{\"name\":\"rolloff\",\"min\":0,\"max\":1,\"default\":0.7,\"type\":\"float\",\"group\":\"cluster\"}"
+            "]}"
+            "}");
 
         pos += snprintf(sbuf + pos, (size_t)(SPEC_BUF_SIZE - pos), "}");
 
@@ -1235,6 +1251,35 @@ static void http_handle_api(int fd, const char *body) {
             strncpy(g_patches[idx].name, new_name, PATCH_NAME_MAX - 1);
             patches_save();
             rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
+    }
+    else if (strcmp(type_str, "waveform") == 0) {
+        /* Return wavetable data for oscillator view */
+        int ch = 0;
+        json_get_int(body, "channel", &ch);
+        if (ch >= 0 && ch < MAX_SLOTS) {
+            RackSlot *slot = &g_rack.slots[ch];
+            if (slot->active && slot->state &&
+                strcmp(g_type_registry[slot->type_idx]->name, "additive") == 0) {
+                AdditiveState *as = (AdditiveState *)slot->state;
+                if (as->table_dirty) additive_build_table(as);
+                /* Downsample to 256 points for the view */
+                int pos = 0;
+                pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos), "{\"samples\":[");
+                int step = ADD_TABLE_SIZE / 256;
+                for (int i = 0; i < 256; i++) {
+                    pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos),
+                        "%s%.4f", i ? "," : "", (double)as->table[i * step]);
+                }
+                pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos),
+                    "],\"length\":256,\"mode\":%d,\"harmonics\":%d}",
+                    as->mode, as->num_harmonics);
+                rlen = pos;
+            } else {
+                rlen = snprintf(resp, sizeof(resp), "{\"error\":\"not additive\"}");
+            }
+        } else {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"bad channel\"}");
         }
     }
     else if (strcmp(type_str, "panic") == 0) {

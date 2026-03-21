@@ -30,6 +30,7 @@
 #include "ym2413.h"
 #include "sub-synth.h"
 #include "fm-drums.h"
+#include "additive.h"
 #include "platform.h"
 
 /* ── Constants ──────────────────────────────────────────────────────── */
@@ -249,6 +250,7 @@ static void rack_init(void) {
     rack_register_type(&ym2413_type);
     rack_register_type(&sub_synth_type);
     rack_register_type(&fm_drums_type);
+    rack_register_type(&additive_type);
 }
 
 static int rack_set_slot(int channel, const char *type_name) {
@@ -747,6 +749,7 @@ static void render_mix(float *mix_buf, float *slot_buf, int frames, int sample_r
             else if (strcmp(itype->name, "sub-synth") == 0) ((SubSynth *)st)->cents_mod = slot->cents_mod;
             else if (strcmp(itype->name, "ym2413") == 0) ((YM2413State *)st)->cents_mod = slot->cents_mod;
             else if (strcmp(itype->name, "fm-drums") == 0) ((FMDrumState *)st)->cents_mod = slot->cents_mod;
+            else if (strcmp(itype->name, "additive") == 0) ((AdditiveState *)st)->cents_mod = slot->cents_mod;
         }
 
         memset(slot_buf, 0, sizeof(float) * (size_t)(frames * CHANNELS));
