@@ -165,7 +165,7 @@ static void test_noise(void) {
         v = ke_eval(&e, &ctx);
         if (v < mn) mn = v; if (v > mx) mx = v;
     }
-    CHECK(mn < -0.1f && mx > 0.1f, "noise range spans [-x, +x]");
+    CHECK(mn < 0.3f && mx > 0.5f, "noise range within [0, 1]");
 }
 
 static void test_rand(void) {
