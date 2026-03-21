@@ -103,14 +103,14 @@ static int build_rack_status_json(char *buf, int max) {
         "\"audio_backend\":\"%s\",\"local_mute\":%d,"
         "\"osc_port\":%d,\"mcast_active\":%d,\"mcast_group\":\"%s:%d\","
         "\"bus_active\":%d,\"bus_slot\":%d,"
-        "\"sse_clients\":%d}",
+        "\"sse_clients\":%d,\"bpm\":%.1f}",
         (double)g_rack.master_volume, esc_midi,
         g_use_jack ? "JACK" : platform_audio_fallback_name(),
         g_rack.local_mute,
         DEFAULT_OSC_PORT, g_mcast_active,
         MCAST_GROUP, DEFAULT_MCAST_PORT,
         g_bus_active, g_bus_slot,
-        sse_count);
+        sse_count, (double)g_bpm);
 
     return pos;
 }
@@ -735,6 +735,76 @@ static void http_handle_api(int fd, const char *body) {
         }
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
     }
+    else if (strcmp(type_str, "keyseq_preset_list") == 0) {
+        int pos = 0;
+        pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos), "{\"presets\":[");
+        for (int i = 0; i < g_num_ks_presets; i++) {
+            char en[128], ed[1024];
+            json_escape(en, sizeof(en), g_ks_presets[i].name);
+            json_escape(ed, sizeof(ed), g_ks_presets[i].dsl);
+            pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos),
+                "%s{\"name\":\"%s\",\"dsl\":\"%s\"}", i?",":"", en, ed);
+        }
+        pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos), "]}");
+        rlen = pos;
+    }
+    else if (strcmp(type_str, "keyseq_preset_save") == 0) {
+        char name[PATCH_NAME_MAX] = "", dsl[512] = "";
+        json_get_string(body, "name", name, sizeof(name));
+        json_get_string(body, "dsl", dsl, sizeof(dsl));
+        if (!name[0]) { rlen = snprintf(resp, sizeof(resp), "{\"error\":\"no name\"}"); }
+        else {
+            int idx = ks_preset_find(name);
+            if (idx < 0) {
+                if (g_num_ks_presets >= MAX_KEYSEQ_PRESETS)
+                    { rlen = snprintf(resp, sizeof(resp), "{\"error\":\"limit\"}"); goto ks_preset_done; }
+                idx = g_num_ks_presets++;
+            }
+            strncpy(g_ks_presets[idx].name, name, PATCH_NAME_MAX - 1);
+            strncpy(g_ks_presets[idx].dsl, dsl, 511);
+            ks_presets_save();
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true,\"index\":%d}", idx);
+        }
+        ks_preset_done:;
+    }
+    else if (strcmp(type_str, "keyseq_preset_delete") == 0) {
+        char name[PATCH_NAME_MAX] = "";
+        json_get_string(body, "name", name, sizeof(name));
+        int idx = ks_preset_find(name);
+        if (idx < 0) { rlen = snprintf(resp, sizeof(resp), "{\"error\":\"not found\"}"); }
+        else {
+            for (int i = idx; i < g_num_ks_presets - 1; i++) g_ks_presets[i] = g_ks_presets[i+1];
+            g_num_ks_presets--;
+            ks_presets_save();
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
+    }
+    else if (strcmp(type_str, "keyseq_preset_rename") == 0) {
+        char name[PATCH_NAME_MAX] = "", new_name[PATCH_NAME_MAX] = "";
+        json_get_string(body, "name", name, sizeof(name));
+        json_get_string(body, "new_name", new_name, sizeof(new_name));
+        int idx = ks_preset_find(name);
+        if (idx < 0) { rlen = snprintf(resp, sizeof(resp), "{\"error\":\"not found\"}"); }
+        else if (!new_name[0]) { rlen = snprintf(resp, sizeof(resp), "{\"error\":\"empty name\"}"); }
+        else {
+            strncpy(g_ks_presets[idx].name, new_name, PATCH_NAME_MAX - 1);
+            ks_presets_save();
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
+    }
+    else if (strcmp(type_str, "bpm") == 0) {
+        float bpm = 120.0f;
+        if (json_get_float(body, "value", &bpm) == 0 && bpm > 0 && bpm <= 999) {
+            g_bpm = bpm;
+            /* Update BPM on all active keyseqs */
+            for (int i = 0; i < MAX_SLOTS; i++) {
+                if (g_rack.slots[i].keyseq) g_rack.slots[i].keyseq->bpm = bpm;
+                if (g_rack.slots[i].seq) g_rack.slots[i].seq->bpm = bpm;
+            }
+            sse_mark_dirty();
+        }
+        rlen = snprintf(resp, sizeof(resp), "{\"ok\":true,\"bpm\":%.1f}", (double)g_bpm);
+    }
     else if (strcmp(type_str, "keyseq_spec") == 0) {
         int ch = -1;
         json_get_int(body, "channel", &ch);
@@ -1063,11 +1133,25 @@ static void http_handle_api(int fd, const char *body) {
                     float cents = (cur_n - (float)midi) * 100.0f;
                     float beat_pos = total_beats;
 
+                    /* Evaluate frame expression at mid-gate for this step */
+                    float frame_cents = 0;
+                    if (ks->expr_frame.valid) {
+                        float time_sec = beat_pos * 60.0f / bpm;
+                        KeySeqCtx fctx = {
+                            .n = cur_n, .v = cur_v, .t = algo_t, .g = algo_g,
+                            .i = (float)i, .root = (float)note, .rv = root_vel,
+                            .time = time_sec, .bu = 0.5f, .gate = 0.5f, .held = 1.0f,
+                            .seed = (float)seed,
+                            .local_rand = &local_rand, .local_fnl = &local_fnl
+                        };
+                        frame_cents = ke_eval(&ks->expr_frame, &fctx);
+                    }
+
                     pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos),
                         "%s{\"i\":%d,\"n\":%.2f,\"midi\":%d,\"v\":%.4f,"
-                        "\"t\":%.4f,\"g\":%.4f,\"cents\":%.1f,\"beat\":%.3f}",
+                        "\"t\":%.4f,\"g\":%.4f,\"cents\":%.1f,\"beat\":%.3f,\"frame_cents\":%.1f}",
                         i ? "," : "", i, (double)cur_n, midi, (double)cur_v,
-                        (double)algo_t, (double)algo_g, (double)cents, (double)beat_pos);
+                        (double)algo_t, (double)algo_g, (double)cents, (double)beat_pos, (double)frame_cents);
 
                     total_beats += algo_t;
 

@@ -378,6 +378,8 @@ static void rack_clear_slot(int channel) {
 
 static char g_state_path[512] = "";
 static char g_patches_path[512] = "";
+static char g_keyseq_presets_path[512] = "";
+static float g_bpm = 120.0f; /* global tempo */
 static volatile int g_state_dirty = 0;
 
 /* ── User patch storage ───────────────────────────────────────────────── */
@@ -473,6 +475,98 @@ static int patch_find(const char *name) {
     return -1;
 }
 
+/* ── KeySeq preset storage ─────────────────────────────────────────── */
+
+#define MAX_KEYSEQ_PRESETS 64
+
+typedef struct {
+    char name[PATCH_NAME_MAX];
+    char dsl[512];
+} KeySeqPreset;
+
+static KeySeqPreset g_ks_presets[MAX_KEYSEQ_PRESETS];
+static int g_num_ks_presets = 0;
+
+static const char *FACTORY_KS_PRESETS[][2] = {
+    {"My Sequence",    "t0.125; gated; algo; n:n+1; v:v-0.03; end:v<=0"},
+    {"Shimmer",        "t0.125; g0.9; loop; 0,12,7,12; v1,0.7,0.5,0.3"},
+    {"Climb",          "t0.125; gated; algo; n:n+1; v:v-0.03; end:v<=0"},
+    {"Siren",          "t0.5; gated; algo; n:root+i%2*10-5; v:v; end:v<=0"},
+    {"Rapid Fire",     "t0.2; g0.5; gated; algo; n:n; v:v-0.005; end:v<=0"},
+    {"Circle of 5ths", "t0.125; gated; algo; n:root+i*7%12; v:v-0.01; end:v<=0"},
+    {"Bounce",         "t0.125; gated; algo; n:root+abs(i%8-4)*3; v:v-0.02; end:v<=0"},
+    {"Scatter",        "t0.1; g0.8; gated; algo; n:root+i*13%24-12; v:v-0.015; end:v<=0"},
+    {NULL, NULL}
+};
+
+static void ks_presets_save(void) {
+    if (!g_keyseq_presets_path[0]) return;
+    FILE *f = fopen(g_keyseq_presets_path, "w");
+    if (!f) return;
+    fprintf(f, "[\n");
+    for (int i = 0; i < g_num_ks_presets; i++) {
+        char en[128], ed[1024];
+        json_escape(en, sizeof(en), g_ks_presets[i].name);
+        json_escape(ed, sizeof(ed), g_ks_presets[i].dsl);
+        fprintf(f, "  {\"name\":\"%s\",\"dsl\":\"%s\"}%s\n",
+                en, ed, (i < g_num_ks_presets - 1) ? "," : "");
+    }
+    fprintf(f, "]\n");
+    fclose(f);
+}
+
+static void ks_presets_load(void) {
+    if (!g_keyseq_presets_path[0]) return;
+    FILE *f = fopen(g_keyseq_presets_path, "r");
+    if (!f) {
+        /* Seed factory presets */
+        for (int i = 0; FACTORY_KS_PRESETS[i][0] && g_num_ks_presets < MAX_KEYSEQ_PRESETS; i++) {
+            strncpy(g_ks_presets[g_num_ks_presets].name, FACTORY_KS_PRESETS[i][0], PATCH_NAME_MAX - 1);
+            strncpy(g_ks_presets[g_num_ks_presets].dsl, FACTORY_KS_PRESETS[i][1], 511);
+            g_num_ks_presets++;
+        }
+        ks_presets_save();
+        fprintf(stderr, "[miniwave] seeded %d factory keyseq presets\n", g_num_ks_presets);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 128 * 1024) { fclose(f); return; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    buf[rd] = '\0'; fclose(f);
+
+    g_num_ks_presets = 0;
+    const char *p = buf;
+    while (g_num_ks_presets < MAX_KEYSEQ_PRESETS) {
+        const char *obj = strchr(p, '{');
+        if (!obj) break;
+        const char *end = strchr(obj, '}');
+        if (!end) break;
+        int olen = (int)(end - obj + 1);
+        char *oj = calloc(1, (size_t)(olen + 1));
+        if (!oj) break;
+        memcpy(oj, obj, (size_t)olen);
+        KeySeqPreset *kp = &g_ks_presets[g_num_ks_presets];
+        memset(kp, 0, sizeof(*kp));
+        json_get_string(oj, "name", kp->name, PATCH_NAME_MAX);
+        json_get_string(oj, "dsl", kp->dsl, sizeof(kp->dsl));
+        if (kp->name[0]) g_num_ks_presets++;
+        free(oj);
+        p = end + 1;
+    }
+    free(buf);
+    fprintf(stderr, "[miniwave] loaded %d keyseq presets\n", g_num_ks_presets);
+}
+
+static int ks_preset_find(const char *name) {
+    for (int i = 0; i < g_num_ks_presets; i++)
+        if (strcmp(g_ks_presets[i].name, name) == 0) return i;
+    return -1;
+}
+
 static void sse_mark_dirty(void); /* forward decl */
 static void state_mark_dirty(void) { g_state_dirty = 1; sse_mark_dirty(); }
 
@@ -490,11 +584,13 @@ static void state_init_path(void) {
     if (cfg && cfg[0]) {
         snprintf(g_state_path, sizeof(g_state_path), "%s/miniwave/rack.json", cfg);
         snprintf(g_patches_path, sizeof(g_patches_path), "%s/miniwave/patches.json", cfg);
+        snprintf(g_keyseq_presets_path, sizeof(g_keyseq_presets_path), "%s/miniwave/keyseq_presets.json", cfg);
     } else {
         const char *home = getenv("HOME");
         if (!home) home = "/tmp";
         snprintf(g_state_path, sizeof(g_state_path), "%s/.config/miniwave/rack.json", home);
         snprintf(g_patches_path, sizeof(g_patches_path), "%s/.config/miniwave/patches.json", home);
+        snprintf(g_keyseq_presets_path, sizeof(g_keyseq_presets_path), "%s/.config/miniwave/keyseq_presets.json", home);
     }
 }
 
