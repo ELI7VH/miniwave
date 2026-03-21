@@ -813,7 +813,7 @@ static void keyseq_tick(KeySeq *ks, float dt) {
                 .i = (float)ks->current_step, .root = (float)ks->root_note,
                 .rv = ks->root_velocity,
                 .time = ks->total_time, .bu = bu_val,
-                .gate = 0, .held = ks->root_held ? 1.0f : 0.0f,
+                .gate = ks->root_held ? 1.0f : 0.0f, .held = ks->root_held ? 1.0f : 0.0f,
                 .seed = (float)ks->runtime_seed,
                 .local_rand = &ks->rand_state, .local_fnl = &ks->fnl
             };
