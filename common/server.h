@@ -1102,6 +1102,138 @@ static void http_handle_api(int fd, const char *body) {
             }
         }
     }
+    else if (strcmp(type_str, "patch_list") == 0) {
+        /* List user patches, optionally filtered by instrument type */
+        char filter[32] = "";
+        json_get_string(body, "instrument", filter, sizeof(filter));
+
+        int pos = 0;
+        pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos), "{\"patches\":[");
+        int first = 1;
+        for (int i = 0; i < g_num_patches; i++) {
+            if (filter[0] && strcmp(g_patches[i].type, filter) != 0) continue;
+            char esc_name[128];
+            json_escape(esc_name, sizeof(esc_name), g_patches[i].name);
+            pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos),
+                "%s{\"name\":\"%s\",\"type\":\"%s\",\"has_keyseq\":%d,\"has_seq\":%d}",
+                first ? "" : ",", esc_name, g_patches[i].type,
+                g_patches[i].keyseq_dsl[0] ? 1 : 0,
+                g_patches[i].seq_dsl[0] ? 1 : 0);
+            first = 0;
+        }
+        pos += snprintf(resp + pos, (size_t)(SSE_BUF_SIZE - pos), "]}");
+        rlen = pos;
+    }
+    else if (strcmp(type_str, "patch_save") == 0) {
+        /* Save current channel state as a named patch */
+        int ch = 0;
+        char name[PATCH_NAME_MAX] = "";
+        json_get_int(body, "channel", &ch);
+        json_get_string(body, "name", name, sizeof(name));
+
+        if (!name[0] || ch < 0 || ch >= MAX_SLOTS) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"bad args\"}");
+        } else {
+            RackSlot *slot = &g_rack.slots[ch];
+            if (!slot->active || !slot->state) {
+                rlen = snprintf(resp, sizeof(resp), "{\"error\":\"no instrument\"}");
+            } else {
+                InstrumentType *itype = g_type_registry[slot->type_idx];
+                /* Find or create patch slot */
+                int idx = patch_find(name);
+                if (idx < 0) {
+                    if (g_num_patches >= MAX_USER_PATCHES) {
+                        rlen = snprintf(resp, sizeof(resp), "{\"error\":\"patch limit\"}");
+                        goto patch_done;
+                    }
+                    idx = g_num_patches++;
+                }
+                UserPatch *up = &g_patches[idx];
+                strncpy(up->name, name, PATCH_NAME_MAX - 1);
+                strncpy(up->type, itype->name, sizeof(up->type) - 1);
+                if (itype->json_save) {
+                    itype->json_save(slot->state, up->data, PATCH_DATA_MAX);
+                } else {
+                    up->data[0] = '\0';
+                }
+                /* Include keyseq + seq DSL */
+                up->keyseq_dsl[0] = '\0';
+                up->seq_dsl[0] = '\0';
+                if (slot->keyseq && slot->keyseq->enabled && slot->keyseq->source[0])
+                    strncpy(up->keyseq_dsl, slot->keyseq->source, sizeof(up->keyseq_dsl) - 1);
+                if (slot->seq && slot->seq->source[0])
+                    strncpy(up->seq_dsl, slot->seq->source, sizeof(up->seq_dsl) - 1);
+                patches_save();
+                rlen = snprintf(resp, sizeof(resp), "{\"ok\":true,\"index\":%d}", idx);
+            }
+        }
+        patch_done:;
+    }
+    else if (strcmp(type_str, "patch_load") == 0) {
+        /* Load a named patch onto a channel */
+        int ch = 0;
+        char name[PATCH_NAME_MAX] = "";
+        json_get_int(body, "channel", &ch);
+        json_get_string(body, "name", name, sizeof(name));
+
+        int idx = patch_find(name);
+        if (idx < 0) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"patch not found\"}");
+        } else if (ch < 0 || ch >= MAX_SLOTS) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"bad channel\"}");
+        } else {
+            UserPatch *up = &g_patches[idx];
+            RackSlot *slot = &g_rack.slots[ch];
+            /* Ensure correct instrument type is loaded */
+            if (!slot->active || !slot->state || strcmp(g_type_registry[slot->type_idx]->name, up->type) != 0) {
+                rack_set_slot(ch, up->type);
+                slot = &g_rack.slots[ch];
+            }
+            if (slot->active && slot->state) {
+                InstrumentType *itype = g_type_registry[slot->type_idx];
+                if (itype->json_load) itype->json_load(slot->state, up->data);
+                /* Restore keyseq + seq */
+                if (slot->keyseq && up->keyseq_dsl[0])
+                    keyseq_parse(slot->keyseq, up->keyseq_dsl);
+                if (slot->seq && up->seq_dsl[0])
+                    seq_parse(slot->seq, up->seq_dsl);
+                state_mark_dirty();
+                rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+            } else {
+                rlen = snprintf(resp, sizeof(resp), "{\"error\":\"load failed\"}");
+            }
+        }
+    }
+    else if (strcmp(type_str, "patch_delete") == 0) {
+        char name[PATCH_NAME_MAX] = "";
+        json_get_string(body, "name", name, sizeof(name));
+        int idx = patch_find(name);
+        if (idx < 0) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"not found\"}");
+        } else {
+            /* Shift remaining patches down */
+            for (int i = idx; i < g_num_patches - 1; i++)
+                g_patches[i] = g_patches[i + 1];
+            g_num_patches--;
+            patches_save();
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
+    }
+    else if (strcmp(type_str, "patch_rename") == 0) {
+        char name[PATCH_NAME_MAX] = "", new_name[PATCH_NAME_MAX] = "";
+        json_get_string(body, "name", name, sizeof(name));
+        json_get_string(body, "new_name", new_name, sizeof(new_name));
+        int idx = patch_find(name);
+        if (idx < 0) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"not found\"}");
+        } else if (!new_name[0]) {
+            rlen = snprintf(resp, sizeof(resp), "{\"error\":\"empty name\"}");
+        } else {
+            strncpy(g_patches[idx].name, new_name, PATCH_NAME_MAX - 1);
+            patches_save();
+            rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
+        }
+    }
     else if (strcmp(type_str, "panic") == 0) {
         /* All notes off on all channels, stop all keyseqs */
         for (int ch = 0; ch < MAX_SLOTS; ch++) {

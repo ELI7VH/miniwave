@@ -375,7 +375,101 @@ static void rack_clear_slot(int channel) {
  * ══════════════════════════════════════════════════════════════════════ */
 
 static char g_state_path[512] = "";
+static char g_patches_path[512] = "";
 static volatile int g_state_dirty = 0;
+
+/* ── User patch storage ───────────────────────────────────────────────── */
+/* Simple JSON file: array of {name, type, params:{...}} objects.
+ * Max 256 patches. Loaded at startup, saved on mutation. */
+
+#define MAX_USER_PATCHES 256
+#define PATCH_NAME_MAX 64
+#define PATCH_DATA_MAX 2048
+
+typedef struct {
+    char name[PATCH_NAME_MAX];
+    char type[32];              /* instrument type name */
+    char data[PATCH_DATA_MAX];  /* JSON params blob from json_save */
+    char keyseq_dsl[512];       /* keyseq DSL string */
+    char seq_dsl[256];          /* seq DSL string */
+} UserPatch;
+
+static UserPatch g_patches[MAX_USER_PATCHES];
+static int g_num_patches = 0;
+
+static void patches_save(void) {
+    if (!g_patches_path[0]) return;
+    FILE *f = fopen(g_patches_path, "w");
+    if (!f) return;
+    fprintf(f, "[\n");
+    for (int i = 0; i < g_num_patches; i++) {
+        char esc_name[128], esc_data[PATCH_DATA_MAX], esc_ks[1024], esc_seq[512];
+        json_escape(esc_name, sizeof(esc_name), g_patches[i].name);
+        json_escape(esc_data, sizeof(esc_data), g_patches[i].data);
+        json_escape(esc_ks, sizeof(esc_ks), g_patches[i].keyseq_dsl);
+        json_escape(esc_seq, sizeof(esc_seq), g_patches[i].seq_dsl);
+        fprintf(f, "  {\"name\":\"%s\",\"type\":\"%s\",\"params\":\"%s\"",
+                esc_name, g_patches[i].type, esc_data);
+        if (g_patches[i].keyseq_dsl[0])
+            fprintf(f, ",\"keyseq_dsl\":\"%s\"", esc_ks);
+        if (g_patches[i].seq_dsl[0])
+            fprintf(f, ",\"seq_dsl\":\"%s\"", esc_seq);
+        fprintf(f, "}%s\n", (i < g_num_patches - 1) ? "," : "");
+    }
+    fprintf(f, "]\n");
+    fclose(f);
+}
+
+static void patches_load(void) {
+    if (!g_patches_path[0]) return;
+    FILE *f = fopen(g_patches_path, "r");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 512 * 1024) { fclose(f); return; }
+
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    buf[rd] = '\0';
+    fclose(f);
+
+    g_num_patches = 0;
+    /* Simple array-of-objects parser */
+    const char *p = buf;
+    while (g_num_patches < MAX_USER_PATCHES) {
+        const char *obj = strchr(p, '{');
+        if (!obj) break;
+        const char *end = strchr(obj, '}');
+        if (!end) break;
+
+        int olen = (int)(end - obj + 1);
+        char *ojson = calloc(1, (size_t)(olen + 1));
+        if (!ojson) break;
+        memcpy(ojson, obj, (size_t)olen);
+
+        UserPatch *up = &g_patches[g_num_patches];
+        memset(up, 0, sizeof(*up));
+        json_get_string(ojson, "name", up->name, PATCH_NAME_MAX);
+        json_get_string(ojson, "type", up->type, sizeof(up->type));
+        json_get_string(ojson, "params", up->data, PATCH_DATA_MAX);
+        json_get_string(ojson, "keyseq_dsl", up->keyseq_dsl, sizeof(up->keyseq_dsl));
+        json_get_string(ojson, "seq_dsl", up->seq_dsl, sizeof(up->seq_dsl));
+
+        if (up->name[0] && up->type[0]) g_num_patches++;
+        free(ojson);
+        p = end + 1;
+    }
+    free(buf);
+    fprintf(stderr, "[miniwave] loaded %d user patches from %s\n", g_num_patches, g_patches_path);
+}
+
+static int patch_find(const char *name) {
+    for (int i = 0; i < g_num_patches; i++)
+        if (strcmp(g_patches[i].name, name) == 0) return i;
+    return -1;
+}
 
 static void sse_mark_dirty(void); /* forward decl */
 static void state_mark_dirty(void) { g_state_dirty = 1; sse_mark_dirty(); }
@@ -393,10 +487,12 @@ static void state_init_path(void) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
     if (cfg && cfg[0]) {
         snprintf(g_state_path, sizeof(g_state_path), "%s/miniwave/rack.json", cfg);
+        snprintf(g_patches_path, sizeof(g_patches_path), "%s/miniwave/patches.json", cfg);
     } else {
         const char *home = getenv("HOME");
         if (!home) home = "/tmp";
         snprintf(g_state_path, sizeof(g_state_path), "%s/.config/miniwave/rack.json", home);
+        snprintf(g_patches_path, sizeof(g_patches_path), "%s/.config/miniwave/patches.json", home);
     }
 }
 

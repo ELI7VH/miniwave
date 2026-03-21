@@ -386,6 +386,7 @@ int main(int argc, char *argv[]) {
     rack_init();
     state_init_path();
     state_load();
+    patches_load();
     keyseq_wire_graph_broadcast();
 
     for (int i = 0; i < pre_config; i++) {
