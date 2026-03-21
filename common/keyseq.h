@@ -436,9 +436,11 @@ typedef struct KeySeq {
     float note_time;
     float total_time;
 
-    /* Noise/rand seed */
+    /* Noise/rand seed — per-instance, no global state mutation */
     KeySeqExpr expr_seed;       /* evaluated at note-on, result → noise domain offset */
     uint32_t runtime_seed;      /* active seed for current note */
+    uint32_t rand_state;        /* per-keyseq PRNG state */
+    fnl_state fnl;              /* per-keyseq noise state */
 
     /* Callbacks */
     void   *inst_state;
@@ -461,6 +463,10 @@ static void keyseq_init(KeySeq *ks) {
     ks->bpm = 120.0f;
     ks->last_played_note = -1;
     ks->graph_fn = g_keyseq_graph_fn;
+    ks->rand_state = 1;
+    ks->fnl = fnlCreateState();
+    ks->fnl.noise_type = FNL_NOISE_PERLIN;
+    ks->fnl.frequency = 1.0f;
 }
 
 static void keyseq_bind(KeySeq *ks, void *inst_state,
@@ -528,6 +534,7 @@ static int keyseq_parse(KeySeq *ks, const char *dsl) {
     void *saved_state = ks->inst_state;
     void (*saved_fn)(void *, uint8_t, uint8_t, uint8_t) = ks->midi_fn;
     void (*saved_pfn)(void *, const char *, float) = ks->param_fn;
+    void (*saved_gfn)(const char *, int) = ks->graph_fn;
     uint8_t saved_ch = ks->midi_channel;
     float saved_bpm = ks->bpm;
 
@@ -541,8 +548,14 @@ static int keyseq_parse(KeySeq *ks, const char *dsl) {
     ks->inst_state = saved_state;
     ks->midi_fn = saved_fn;
     ks->param_fn = saved_pfn;
+    ks->graph_fn = saved_gfn;
     ks->midi_channel = saved_ch;
     ks->bpm = saved_bpm;
+    /* Restore per-instance noise state */
+    ks->fnl = fnlCreateState();
+    ks->fnl.noise_type = FNL_NOISE_PERLIN;
+    ks->fnl.frequency = 1.0f;
+    ks->rand_state = 1;
 
     if (!dsl || !*dsl) { ks->enabled = 0; return 0; }
     strncpy(ks->source, dsl, sizeof(ks->source) - 1);
@@ -698,7 +711,8 @@ static int keyseq_note_on(KeySeq *ks, int note, int velocity) {
         clock_gettime(CLOCK_MONOTONIC, &ts);
         ks->runtime_seed = (uint32_t)(ts.tv_nsec ^ (ts.tv_sec * 1000003)) | 1;
     }
-    ke_rand_state = ks->runtime_seed;
+    ks->rand_state = ks->runtime_seed;
+    ks->fnl.seed = (int)ks->runtime_seed;
 
     ks->algo_n = (float)note;
     ks->algo_v = ks->root_velocity;
@@ -770,7 +784,8 @@ static void keyseq_tick(KeySeq *ks, float dt) {
             .time = ks->note_time, .bu = bu_val,
             .gate = (gate_sec > 0) ? ks->gate_elapsed / gate_sec : 0,
             .held = ks->root_held ? 1.0f : 0.0f,
-            .dt = dt, .seed = (float)ks->runtime_seed
+            .dt = dt, .seed = (float)ks->runtime_seed,
+            .local_rand = &ks->rand_state, .local_fnl = &ks->fnl
         };
         if (ks->expr_frame.valid)
             ks->cents_mod = ke_eval(&ks->expr_frame, &fc);
@@ -799,7 +814,8 @@ static void keyseq_tick(KeySeq *ks, float dt) {
                 .rv = ks->root_velocity,
                 .time = ks->total_time, .bu = bu_val,
                 .gate = 0, .held = ks->root_held ? 1.0f : 0.0f,
-                .seed = (float)ks->runtime_seed
+                .seed = (float)ks->runtime_seed,
+                .local_rand = &ks->rand_state, .local_fnl = &ks->fnl
             };
             float new_n = ks->expr_n.valid ? ke_eval(&ks->expr_n, &ctx) : ctx.n;
             float new_v = ks->expr_v.valid ? ke_eval(&ks->expr_v, &ctx) : ctx.v;

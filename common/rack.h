@@ -90,6 +90,66 @@ static int g_bus_active = 0;    /* 1 = shared memory bus connected */
 static int g_bus_slot = -1;     /* which bus slot we claimed */
 static int g_mcast_active = 0;  /* 1 = multicast broadcasting */
 
+/* ── JSON string escaping (shared utility) ─────────────────────────── */
+
+#ifndef JSON_ESCAPE_DEFINED
+#define JSON_ESCAPE_DEFINED
+static int json_escape(char *dst, int max, const char *src) {
+    int j = 0;
+    for (int i = 0; src[i] && j < max - 2; i++) {
+        char c = src[i];
+        if (c == '"' || c == '\\') { if (j+2>=max) break; dst[j++]='\\'; dst[j++]=c; }
+        else if (c == '\n') { if (j+2>=max) break; dst[j++]='\\'; dst[j++]='n'; }
+        else if (c == '\r') { if (j+2>=max) break; dst[j++]='\\'; dst[j++]='r'; }
+        else if ((unsigned char)c < 0x20) continue;
+        else dst[j++] = c;
+    }
+    dst[j] = '\0';
+    return j;
+}
+#endif
+
+/* ── Deferred free queue (RCU-lite) ─────────────────────────────────── */
+/* Slot swaps queue old state here. The render thread drains it at the
+ * start of each render_mix call — safe because render is the only
+ * consumer that could have been holding a pointer to the old state. */
+
+#define DEFERRED_FREE_MAX 32
+
+typedef struct {
+    void *ptr;
+    void (*destroy)(void *state);  /* instrument destructor, or NULL for plain free */
+} DeferredFree;
+
+static DeferredFree g_deferred_free[DEFERRED_FREE_MAX];
+static _Atomic int  g_deferred_free_count = 0;
+
+static void deferred_free_push(void *ptr, void (*destroy)(void *)) {
+    int idx = atomic_fetch_add(&g_deferred_free_count, 1);
+    if (idx < DEFERRED_FREE_MAX) {
+        g_deferred_free[idx].ptr = ptr;
+        g_deferred_free[idx].destroy = destroy;
+    } else {
+        /* Queue full — fall back to immediate free (risky but bounded) */
+        if (destroy) destroy(ptr);
+        else free(ptr);
+        atomic_fetch_sub(&g_deferred_free_count, 1);
+    }
+}
+
+static void deferred_free_drain(void) {
+    int count = atomic_exchange(&g_deferred_free_count, 0);
+    for (int i = 0; i < count && i < DEFERRED_FREE_MAX; i++) {
+        DeferredFree *df = &g_deferred_free[i];
+        if (df->ptr) {
+            if (df->destroy) df->destroy(df->ptr);
+            free(df->ptr);
+            df->ptr = NULL;
+            df->destroy = NULL;
+        }
+    }
+}
+
 /* ── Master Limiter ─────────────────────────────────────────────────── */
 
 static float g_master_limiter_env = 0.0f;
@@ -191,15 +251,11 @@ static int rack_set_slot(int channel, const char *type_name) {
     atomic_store(&slot->active, 0);
     atomic_fetch_add(&slot->gen, 1);
 
-    /* Wait for any in-flight render callback to finish.
-     * Audio buffer at 48kHz/1024 = ~21ms max. 50ms is safe. */
-    usleep(50000);
-
-    /* Free old slot-level seq/keyseq */
+    /* Capture old slot-level seq/keyseq */
     MiniSeq *old_seq = slot->seq;
     KeySeq  *old_keyseq = slot->keyseq;
 
-    /* Swap in new instrument (slot is inactive, no concurrent readers) */
+    /* Swap in new instrument */
     slot->state = new_state;
     slot->type_idx = tidx;
     slot->volume = 1.0f;
@@ -224,14 +280,13 @@ static int rack_set_slot(int channel, const char *type_name) {
     atomic_fetch_add(&slot->gen, 1);
     atomic_store(&slot->active, 1);
 
-    /* Now safe to destroy old state */
+    /* Deferred free — old state cleaned up by render thread next cycle */
     if (was_active && old_state && old_type_idx >= 0) {
         InstrumentType *old_type = g_type_registry[old_type_idx];
-        old_type->destroy(old_state);
-        free(old_state);
+        deferred_free_push(old_state, old_type->destroy);
     }
-    free(old_seq);
-    free(old_keyseq);
+    if (old_seq) deferred_free_push(old_seq, NULL);
+    if (old_keyseq) deferred_free_push(old_keyseq, NULL);
 
     fprintf(stderr, "[miniwave] slot %d = %s\n", channel, itype->display_name);
     state_mark_dirty();
@@ -248,7 +303,6 @@ static void rack_clear_slot(int channel) {
 
     atomic_store(&slot->active, 0);
     atomic_fetch_add(&slot->gen, 1);
-    usleep(50000);
 
     MiniSeq *old_seq = slot->seq;
     KeySeq  *old_keyseq = slot->keyseq;
@@ -262,13 +316,13 @@ static void rack_clear_slot(int channel) {
     slot->keyseq = NULL;
     slot->cents_mod = 0.0f;
 
+    /* Deferred free */
     if (was_active && old_state && old_type_idx >= 0) {
         InstrumentType *itype = g_type_registry[old_type_idx];
-        itype->destroy(old_state);
-        free(old_state);
+        deferred_free_push(old_state, itype->destroy);
     }
-    free(old_seq);
-    free(old_keyseq);
+    if (old_seq) deferred_free_push(old_seq, NULL);
+    if (old_keyseq) deferred_free_push(old_keyseq, NULL);
 
     fprintf(stderr, "[miniwave] slot %d cleared\n", channel);
     state_mark_dirty();
@@ -329,6 +383,12 @@ static void state_save(void) {
                 char inst_buf[4096];
                 int n = itype->json_save(slot->state, inst_buf, (int)sizeof(inst_buf));
                 if (n > 0) fprintf(f, ",%s", inst_buf);
+            }
+            /* Save slot-level keyseq DSL */
+            if (slot->keyseq && slot->keyseq->enabled && slot->keyseq->source[0]) {
+                char esc[1024];
+                json_escape(esc, sizeof(esc), slot->keyseq->source);
+                fprintf(f, ",\"keyseq_dsl\":\"%s\"", esc);
             }
         }
 
@@ -400,6 +460,12 @@ static void state_load(void) {
 
                 if (itype->json_load) {
                     itype->json_load(slot->state, slot_json);
+                }
+
+                /* Restore slot-level keyseq DSL */
+                char ks_dsl[512] = "";
+                if (slot->keyseq && json_get_string(slot_json, "keyseq_dsl", ks_dsl, sizeof(ks_dsl)) == 0 && ks_dsl[0]) {
+                    keyseq_parse(slot->keyseq, ks_dsl);
                 }
             }
         }
@@ -475,6 +541,10 @@ static inline void midi_dispatch_raw(const uint8_t *data, int len) {
 /* ── Render Mixer ──────────────────────────────────────────────────── */
 
 static void render_mix(float *mix_buf, float *slot_buf, int frames, int sample_rate) {
+    /* Drain deferred free queue — safe here because render is the
+     * thread that was holding pointers to old slot state. */
+    deferred_free_drain();
+
     memset(mix_buf, 0, sizeof(float) * (size_t)(frames * CHANNELS));
 
     int any_solo = 0;

@@ -15,31 +15,7 @@
 #include <poll.h>
 #include <time.h>
 
-/* ── JSON string escaping ──────────────────────────────────────────── */
-
-static int json_escape(char *dst, int max, const char *src) {
-    int j = 0;
-    for (int i = 0; src[i] && j < max - 2; i++) {
-        char c = src[i];
-        if (c == '"' || c == '\\') {
-            if (j + 2 >= max) break;
-            dst[j++] = '\\';
-            dst[j++] = c;
-        } else if (c == '\n') {
-            if (j + 2 >= max) break;
-            dst[j++] = '\\'; dst[j++] = 'n';
-        } else if (c == '\r') {
-            if (j + 2 >= max) break;
-            dst[j++] = '\\'; dst[j++] = 'r';
-        } else if ((unsigned char)c < 0x20) {
-            continue; /* skip other control chars */
-        } else {
-            dst[j++] = c;
-        }
-    }
-    dst[j] = '\0';
-    return j;
-}
+/* json_escape defined in rack.h (included before server.h) */
 
 /* ── HTML content (loaded at startup) ──────────────────────────────── */
 
@@ -644,15 +620,9 @@ static void http_handle_api(int fd, const char *body) {
         json_get_int(body, "channel", &ch);
         json_get_int(body, "note", &note);
         json_get_int(body, "velocity", &vel);
-        if (ch >= 0 && ch < MAX_SLOTS) {
-            RackSlot *slot = &g_rack.slots[ch];
-            if (slot->active && slot->state) {
-                InstrumentType *itype = g_type_registry[slot->type_idx];
-                uint8_t status_byte = (uint8_t)(0x90 | (ch & 0x0F));
-                itype->midi(slot->state, status_byte,
-                            (uint8_t)note, (uint8_t)vel);
-            }
-        }
+        /* Route through midi_dispatch_raw so keyseq intercept works */
+        uint8_t msg[3] = { (uint8_t)(0x90 | (ch & 0x0F)), (uint8_t)note, (uint8_t)vel };
+        midi_dispatch_raw(msg, 3);
         mcast_note_on(ch, note, vel);
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
     }
@@ -660,14 +630,8 @@ static void http_handle_api(int fd, const char *body) {
         int ch = 0, note = 60;
         json_get_int(body, "channel", &ch);
         json_get_int(body, "note", &note);
-        if (ch >= 0 && ch < MAX_SLOTS) {
-            RackSlot *slot = &g_rack.slots[ch];
-            if (slot->active && slot->state) {
-                InstrumentType *itype = g_type_registry[slot->type_idx];
-                uint8_t status_byte = (uint8_t)(0x80 | (ch & 0x0F));
-                itype->midi(slot->state, status_byte, (uint8_t)note, 0);
-            }
-        }
+        uint8_t msg[3] = { (uint8_t)(0x80 | (ch & 0x0F)), (uint8_t)note, 0 };
+        midi_dispatch_raw(msg, 3);
         mcast_note_off(ch, note);
         rlen = snprintf(resp, sizeof(resp), "{\"ok\":true}");
     }
