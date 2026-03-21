@@ -1254,6 +1254,30 @@ static void *http_thread_fn(void *arg) {
                     }
                     close(client_fd);
                 }
+                else if (strcmp(method, "GET") == 0 && strcmp(path, "/effex") == 0) {
+                    char exe_dir[1024];
+                    if (platform_exe_dir(exe_dir, sizeof(exe_dir)) == 0) {
+                        char fpath[1280];
+                        snprintf(fpath, sizeof(fpath), "%sweb/effex.html", exe_dir);
+                        FILE *f = fopen(fpath, "r");
+                        if (f) {
+                            fseek(f, 0, SEEK_END);
+                            long sz = ftell(f);
+                            fseek(f, 0, SEEK_SET);
+                            char *data = malloc((size_t)sz);
+                            if (data) {
+                                size_t rd = fread(data, 1, (size_t)sz, f);
+                                http_send_response(client_fd, 200, "text/html; charset=utf-8",
+                                                   data, (int)rd);
+                                free(data);
+                            }
+                            fclose(f);
+                        } else {
+                            http_send_response(client_fd, 404, "text/plain", "Not Found", 9);
+                        }
+                    }
+                    close(client_fd);
+                }
                 else if (strcmp(method, "GET") == 0 &&
                          (strcmp(path, "/osc-spec") == 0 || strcmp(path, "/osc-map") == 0)) {
                     http_send_response(client_fd, 200, "application/json",
@@ -1356,36 +1380,48 @@ static void *http_thread_fn(void *arg) {
 
         long rack_elapsed_ms = (now.tv_sec - last_rack_poll.tv_sec) * 1000 +
                                (now.tv_nsec - last_rack_poll.tv_nsec) / 1000000;
-        if (rack_elapsed_ms >= 500) {
-            last_rack_poll = now;
-            slot_read_begin();
-            char json[SSE_BUF_SIZE];
-            build_rack_status_json(json, (int)sizeof(json));
-            slot_read_end();
-            sse_broadcast("rack_status", json);
-        }
-
-        long detail_elapsed_ms = (now.tv_sec - last_detail_poll.tv_sec) * 1000 +
-                                 (now.tv_nsec - last_detail_poll.tv_nsec) / 1000000;
-        if (detail_elapsed_ms >= 200) {
-            last_detail_poll = now;
-            int detail_ch = -1;
-            pthread_mutex_lock(&g_http_lock);
-            for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
-                if (g_http_clients[i].fd >= 0 && g_http_clients[i].is_sse
-                    && g_http_clients[i].detail_channel >= 0) {
-                    detail_ch = g_http_clients[i].detail_channel;
-                    break;
-                }
-            }
-            pthread_mutex_unlock(&g_http_lock);
-
-            if (detail_ch >= 0 && detail_ch < MAX_SLOTS) {
+        /* Rack status: push on change (throttled 100ms), heartbeat 5s */
+        {
+            int rack_dirty = atomic_exchange(&g_sse_rack_dirty, 0);
+            if ((rack_elapsed_ms >= 100 && rack_dirty) || rack_elapsed_ms >= 5000) {
+                last_rack_poll = now;
                 slot_read_begin();
                 char json[SSE_BUF_SIZE];
-                build_ch_status_json(detail_ch, json, (int)sizeof(json));
+                build_rack_status_json(json, (int)sizeof(json));
                 slot_read_end();
-                sse_broadcast("ch_status", json);
+                sse_broadcast("rack_status", json);
+            } else if (rack_dirty) {
+                atomic_store(&g_sse_rack_dirty, 1); /* re-mark, throttled */
+            }
+        }
+
+        /* Channel detail: push on change (throttled 50ms), no heartbeat */
+        {
+            long detail_elapsed_ms = (now.tv_sec - last_detail_poll.tv_sec) * 1000 +
+                                     (now.tv_nsec - last_detail_poll.tv_nsec) / 1000000;
+            int detail_dirty = atomic_exchange(&g_sse_detail_dirty, 0);
+            if (detail_elapsed_ms >= 50 && detail_dirty) {
+                last_detail_poll = now;
+                int detail_ch = -1;
+                pthread_mutex_lock(&g_http_lock);
+                for (int i = 0; i < MAX_HTTP_CLIENTS; i++) {
+                    if (g_http_clients[i].fd >= 0 && g_http_clients[i].is_sse
+                        && g_http_clients[i].detail_channel >= 0) {
+                        detail_ch = g_http_clients[i].detail_channel;
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&g_http_lock);
+
+                if (detail_ch >= 0 && detail_ch < MAX_SLOTS) {
+                    slot_read_begin();
+                    char json[SSE_BUF_SIZE];
+                    build_ch_status_json(detail_ch, json, (int)sizeof(json));
+                    slot_read_end();
+                    sse_broadcast("ch_status", json);
+                }
+            } else if (detail_dirty) {
+                atomic_store(&g_sse_detail_dirty, 1);
             }
         }
 

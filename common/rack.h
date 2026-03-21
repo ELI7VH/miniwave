@@ -377,7 +377,17 @@ static void rack_clear_slot(int channel) {
 static char g_state_path[512] = "";
 static volatile int g_state_dirty = 0;
 
-static void state_mark_dirty(void) { g_state_dirty = 1; }
+static void sse_mark_dirty(void); /* forward decl */
+static void state_mark_dirty(void) { g_state_dirty = 1; sse_mark_dirty(); }
+
+/* SSE push-on-change flags */
+static _Atomic int g_sse_rack_dirty = 1;    /* 1 = broadcast rack_status on next check */
+static _Atomic int g_sse_detail_dirty = 1;  /* 1 = broadcast ch_status on next check */
+
+static void sse_mark_dirty(void) {
+    atomic_store(&g_sse_rack_dirty, 1);
+    atomic_store(&g_sse_detail_dirty, 1);
+}
 
 static void state_init_path(void) {
     const char *cfg = getenv("XDG_CONFIG_HOME");
@@ -573,10 +583,12 @@ static inline void midi_dispatch_raw(const uint8_t *data, int len) {
     case 0x90:
         itype->midi(st, status, d1, d2);
         if (g_midi_broadcast) g_midi_broadcast(ch, d1, d2, d2 > 0 ? 1 : 0);
+        atomic_store(&g_sse_detail_dirty, 1);
         break;
     case 0x80:
         itype->midi(st, status, d1, d2);
         if (g_midi_broadcast) g_midi_broadcast(ch, d1, 0, 0);
+        atomic_store(&g_sse_detail_dirty, 1);
         break;
     case 0xE0:
         itype->midi(st, status, d1, d2);
