@@ -1510,6 +1510,100 @@ static void *http_thread_fn(void *arg) {
                     }
                     close(client_fd);
                 }
+                else if (strcmp(method, "GET") == 0 && strcmp(path, "/api-help") == 0) {
+                    char *hbuf = (char *)malloc(8192);
+                    if (hbuf) {
+                        int hp = 0;
+                        hp += snprintf(hbuf + hp, (size_t)(8192 - hp),
+                            "miniwave API — %d instrument types, %d slots\n"
+                            "==================================================\n"
+                            "All POST /api {\"type\":\"<type>\", ...}\n\n", g_n_types, MAX_SLOTS);
+
+                        /* Dynamic: registered instrument types */
+                        hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "Instruments: ");
+                        for (int i = 0; i < g_n_types; i++)
+                            hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "%s%s", i?", ":"", g_type_registry[i]->name);
+
+                        /* Dynamic: active slots */
+                        hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "\nActive slots: ");
+                        for (int i = 0; i < MAX_SLOTS; i++) {
+                            RackSlot *sl = &g_rack.slots[i];
+                            if (sl->active && sl->state)
+                                hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "ch%d=%s ", i, g_type_registry[sl->type_idx]->name);
+                        }
+
+                        hp += snprintf(hbuf + hp, (size_t)(8192 - hp),
+                            "\n\n"
+                            "── Rack ──\n"
+                            "rack_status          → slots, volumes, midi, audio, bus, osc, mcast, sse\n"
+                            "rack_types           → registered instrument type names\n"
+                            "slot_set             channel, instrument\n"
+                            "slot_clear           channel\n"
+                            "slot_volume          channel, value(0-1)\n"
+                            "slot_mute            channel, value(0/1)\n"
+                            "slot_solo            channel, value(0/1)\n"
+                            "master_volume        value(0-1)\n"
+                            "local_mute           value(0/1) — bus-only mode\n"
+                            "\n"
+                            "── Notes ──\n"
+                            "note_on              channel, note(0-127), velocity(0-127)\n"
+                            "note_off             channel, note(0-127)\n"
+                            "panic                → all notes off, all keyseqs stopped\n"
+                            "\n"
+                            "── Instrument Params ──\n"
+                            "ch                   channel, path, fargs/iargs — generic param/preset/osc\n"
+                            "keyseq_spec          channel(opt) → full spec: expression lang + instrument schemas + values\n"
+                            "                     schemas include: params[], envelopes[], presets[], patches[], drum_map[]\n"
+                            "\n"
+                            "── Key Sequence ──\n"
+                            "keyseq_dsl           channel, dsl — load algo (semicolon-delimited)\n"
+                            "keyseq_enable        channel, enabled(0/1)\n"
+                            "keyseq_stop          channel\n"
+                            "keyseq_status        channel → enabled, dsl, active_voices\n"
+                            "keyseq_preview       channel, note, velocity → computed steps from server state\n"
+                            "\n"
+                            "── Step Sequencer ──\n"
+                            "seq_dsl              channel, dsl(\"120L C4q E4e G4e\")\n"
+                            "seq_stop             channel\n"
+                            "\n"
+                            "── Patches (server-persisted) ──\n"
+                            "patch_save           channel, name → saves instrument + keyseq + seq\n"
+                            "patch_load           channel, name → returns full state for UI update\n"
+                            "patch_list           instrument(opt) → [{name, type, has_keyseq, has_seq}]\n"
+                            "patch_rename         name, new_name\n"
+                            "patch_delete         name\n"
+                            "\n"
+                            "── MIDI ──\n"
+                            "midi_device          value(device_id)\n"
+                            "midi_devices         → list available\n"
+                            "\n"
+                            "── Specialized ──\n"
+                            "waveform             channel → {samples:[256], mode, harmonics} (additive only)\n"
+                            "debug_lifetime       → slot reader/deferred-free counters\n"
+                            "\n"
+                            "── SSE (GET /events) ──\n"
+                            "hello, rack_status, ch_status, rack_types, midi_devices, keyseq_trigger\n"
+                            "\n"
+                            "── GET ──\n"
+                            "/              web UI\n"
+                            "/events        SSE stream\n"
+                            "/osc-spec      OSC address map\n"
+                            "/keyseq-test   keyseq expression tester\n"
+                            "/api-help      this page\n");
+
+                        /* Dynamic: user patches */
+                        if (g_num_patches > 0) {
+                            hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "\nUser patches (%d): ", g_num_patches);
+                            for (int i = 0; i < g_num_patches && i < 20; i++)
+                                hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "%s\"%s\"(%s)", i?", ":"", g_patches[i].name, g_patches[i].type);
+                            hp += snprintf(hbuf + hp, (size_t)(8192 - hp), "\n");
+                        }
+
+                        http_send_response(client_fd, 200, "text/plain; charset=utf-8", hbuf, hp);
+                        free(hbuf);
+                    }
+                    close(client_fd);
+                }
                 else if (strcmp(method, "GET") == 0 &&
                          (strcmp(path, "/osc-spec") == 0 || strcmp(path, "/osc-map") == 0)) {
                     http_send_response(client_fd, 200, "application/json",
