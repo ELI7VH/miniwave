@@ -1,0 +1,16 @@
+[Unit]
+Description=PocketWave OS
+After=local-fs.target sound.target
+Conflicts=lightdm.service pocket-home.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pocketwave-launch
+Restart=on-failure
+RestartSec=3
+User=chip
+Environment=HOME=/home/chip
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=multi-user.target

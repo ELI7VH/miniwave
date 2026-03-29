@@ -1,0 +1,38 @@
+#!/bin/sh
+# PocketWave .xinitrc — minimal X, no WM decorations
+# X runs as root; apps need xhost access
+
+# Allow chip user to connect to X
+xhost +local:
+
+# Disable screen blanking
+xset s off
+xset -dpms
+xset s noblank
+
+# Hide cursor (touchscreen only)
+unclutter -idle 0 -root 2>/dev/null &
+
+# Start miniwave engine as chip user
+su chip -c "/usr/local/bin/pocketwave-launch --engine-only" &
+
+# Wait for engine
+sleep 3
+
+# Launch stterm with pocketwave-ui as chip user
+su chip -c "DISPLAY=:0 stterm -T pocketwave -f 'DejaVu Sans Mono:size=24' -e /usr/local/bin/pocketwave-ui" &
+STTERM_PID=$!
+
+# Wait for stterm window, then force fullscreen
+for i in 1 2 3 4 5 6 7 8; do
+    WID=$(xdotool search --name pocketwave 2>/dev/null | head -1)
+    [ -n "$WID" ] && break
+    sleep 1
+done
+if [ -n "$WID" ]; then
+    xprop -id "$WID" -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "2, 0, 0, 0, 0"
+    xdotool windowmove "$WID" 0 0
+    xdotool windowsize "$WID" 480 272
+fi
+
+wait $STTERM_PID

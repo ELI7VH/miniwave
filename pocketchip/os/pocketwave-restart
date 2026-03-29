@@ -1,0 +1,56 @@
+#!/bin/bash
+# PocketWave USB hotplug handler
+# Called by udev when USB audio/MIDI is added or removed
+
+EVENT="$1"
+CONFIG="/home/chip/.config/pocketwave/config"
+LOG="/tmp/pocketwave-hotplug.log"
+
+echo "$(date): hotplug event: $EVENT" >> "$LOG"
+
+# Source config
+AUDIO_DEV="hw:2,0"
+AUDIO_FALLBACK="hw:0,0"
+BUFFER_SIZE=256
+MIDI_DEV="20:0"
+CHANNELS=1
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+case "$EVENT" in
+    remove-audio)
+        echo "$(date): USB audio removed, killing miniwave" >> "$LOG"
+        # miniwave gets stuck in D state on USB disconnect — must -9
+        pkill -9 miniwave 2>/dev/null
+        sleep 1
+
+        # Restart on fallback device
+        echo "$(date): restarting on $AUDIO_FALLBACK" >> "$LOG"
+
+        # Setup sun4i mixer
+        /usr/local/bin/pocketwave-alsa-setup
+
+        su - chip -c "/usr/local/bin/miniwave \
+            -c $CHANNELS -o $AUDIO_FALLBACK -P 1024 -m $MIDI_DEV \
+            > /tmp/miniwave.log 2>&1 &"
+        ;;
+
+    add-audio)
+        # Wait for ALSA to enumerate
+        sleep 2
+
+        # Check if preferred device is back
+        if aplay -l 2>/dev/null | grep -q "card ${AUDIO_DEV%%,*}"; then
+            echo "$(date): USB audio reconnected, restarting on $AUDIO_DEV" >> "$LOG"
+            pkill -9 miniwave 2>/dev/null
+            sleep 1
+            su - chip -c "/usr/local/bin/miniwave \
+                -c $CHANNELS -o $AUDIO_DEV -P $BUFFER_SIZE -m $MIDI_DEV \
+                > /tmp/miniwave.log 2>&1 &"
+        fi
+        ;;
+
+    remove-midi|add-midi)
+        # MIDI disconnect doesn't crash miniwave, just log it
+        echo "$(date): MIDI $EVENT (no restart needed)" >> "$LOG"
+        ;;
+esac

@@ -1,0 +1,10 @@
+#!/bin/bash
+# PocketWave ALSA mixer setup for sun4i-codec (hw:0)
+# Enables DAC routes and sets default volume
+
+amixer -c 0 set 'Left Mixer Left DAC' on   2>/dev/null
+amixer -c 0 set 'Right Mixer Right DAC' on 2>/dev/null
+amixer -c 0 set 'Power Amplifier' 80%      2>/dev/null
+amixer -c 0 set 'Power Amplifier Mute' on  2>/dev/null
+
+echo "pocketwave: sun4i-codec mixer configured"

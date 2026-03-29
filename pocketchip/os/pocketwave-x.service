@@ -1,0 +1,15 @@
+[Unit]
+Description=PocketWave X Server
+After=systemd-user-sessions.service systemd-logind.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pocketwave-startx
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+Environment=HOME=/home/chip
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+# PocketWave USB hot-plug rules
+# Restart miniwave when USB audio or MIDI is added/removed
+
+# USB audio device removed
+ACTION=="remove", SUBSYSTEM=="sound", RUN+="/usr/local/bin/pocketwave-restart remove-audio"
+
+# USB audio device added
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="pcm*p", RUN+="/usr/local/bin/pocketwave-restart add-audio"
+
+# USB MIDI device removed
+ACTION=="remove", SUBSYSTEM=="sound", KERNEL=="midi*", RUN+="/usr/local/bin/pocketwave-restart remove-midi"
+
+# USB MIDI device added
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="midi*", RUN+="/usr/local/bin/pocketwave-restart add-midi"
