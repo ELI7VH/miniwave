@@ -24,6 +24,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <alsa/asoundlib.h>
@@ -68,6 +69,9 @@ static int platform_midi_init(void) {
         g_seq = NULL;
         return -1;
     }
+
+    /* subscribe to system announcements for hotplug detection */
+    snd_seq_connect_from(g_seq, g_seq_port, 0, 1); /* System:Announce */
 
     fprintf(stderr, "[miniwave] ALSA seq client %d:%d (miniwave:MIDI In)\n",
             snd_seq_client_id(g_seq), g_seq_port);
@@ -184,6 +188,10 @@ static inline void seq_dispatch(snd_seq_event_t *ev) {
                     0);
         break;
     case SND_SEQ_EVENT_CONTROLLER:
+        /* CC1 = mod wheel → slot vibrato depth */
+        if (ev->data.control.param == 1) {
+            slot->mod_wheel = (float)ev->data.control.value / 127.0f;
+        }
         itype->midi(slot->state,
                     (uint8_t)(0xB0 | ch),
                     (uint8_t)ev->data.control.param,
@@ -199,6 +207,8 @@ static inline void seq_dispatch(snd_seq_event_t *ev) {
         int val = ev->data.control.value + 8192;
         if (val < 0) val = 0;
         if (val > 16383) val = 16383;
+        /* Set slot pitch bend for rack-level processing */
+        slot->pitch_bend = (float)(val - 8192) / 8192.0f;
         itype->midi(slot->state,
                     (uint8_t)(0xE0 | ch),
                     (uint8_t)(val & 0x7F),
@@ -216,6 +226,42 @@ static inline void seq_dispatch(snd_seq_event_t *ev) {
     }
 }
 
+/* Auto-connect to the first available MIDI output port */
+static void platform_midi_auto_connect(void) {
+    if (!g_seq || g_seq_connected) return;
+
+    snd_seq_client_info_t *cinfo;
+    snd_seq_port_info_t *pinfo;
+    snd_seq_client_info_alloca(&cinfo);
+    snd_seq_port_info_alloca(&pinfo);
+
+    snd_seq_client_info_set_client(cinfo, -1);
+    while (snd_seq_query_next_client(g_seq, cinfo) >= 0) {
+        int client = snd_seq_client_info_get_client(cinfo);
+        const char *cname = snd_seq_client_info_get_name(cinfo);
+        if (client == snd_seq_client_id(g_seq)) continue;
+        if (client == 0) continue;
+        if (cname && strstr(cname, "Midi Through")) continue;
+
+        snd_seq_port_info_set_client(pinfo, client);
+        snd_seq_port_info_set_port(pinfo, -1);
+        while (snd_seq_query_next_port(g_seq, pinfo) >= 0) {
+            unsigned int caps = snd_seq_port_info_get_capability(pinfo);
+            if (!(caps & SND_SEQ_PORT_CAP_READ)) continue;
+            if (!(caps & SND_SEQ_PORT_CAP_SUBS_READ)) continue;
+
+            int port = snd_seq_port_info_get_port(pinfo);
+            char addr[32];
+            snprintf(addr, sizeof(addr), "%d:%d", client, port);
+            if (platform_midi_connect(addr) == 0) {
+                fprintf(stderr, "[miniwave] MIDI auto-connected: %s\n",
+                        g_midi_device_name);
+                return;
+            }
+        }
+    }
+}
+
 static void *platform_midi_thread(void *arg) {
     (void)arg;
     if (!g_seq) return NULL;
@@ -225,13 +271,31 @@ static void *platform_midi_thread(void *arg) {
     if (!pfds) return NULL;
     snd_seq_poll_descriptors(g_seq, pfds, (unsigned int)npfds, POLLIN);
 
+    int scan_counter = 0;
+
     while (!g_quit) {
         int ret = poll(pfds, (nfds_t)npfds, 50);
-        if (ret <= 0) continue;
+        if (ret > 0) {
+            snd_seq_event_t *ev = NULL;
+            while (snd_seq_event_input(g_seq, &ev) >= 0 && ev) {
+                if (ev->type == SND_SEQ_EVENT_PORT_EXIT && g_seq_connected &&
+                    ev->data.addr.client == g_seq_src.client) {
+                    fprintf(stderr, "[miniwave] MIDI device disconnected\n");
+                    g_seq_connected = 0;
+                    g_midi_device_name[0] = '\0';
+                } else if (ev->type == SND_SEQ_EVENT_PORT_START && !g_seq_connected) {
+                    /* new MIDI port appeared — try auto-connect */
+                    platform_midi_auto_connect();
+                } else {
+                    seq_dispatch(ev);
+                }
+            }
+        }
 
-        snd_seq_event_t *ev = NULL;
-        while (snd_seq_event_input(g_seq, &ev) >= 0 && ev) {
-            seq_dispatch(ev);
+        /* scan for MIDI devices every ~2s if not connected */
+        if (!g_seq_connected && ++scan_counter >= 40) {
+            platform_midi_auto_connect();
+            scan_counter = 0;
         }
     }
 
@@ -327,8 +391,13 @@ int main(int argc, char *argv[]) {
     if (platform_midi_init() == 0) {
         if (midi_dev[0] != '\0') {
             platform_midi_connect(midi_dev);
-        } else {
-            fprintf(stderr, "[miniwave] MIDI: ready (use -m client:port or OSC /midi/device)\n");
+        }
+        /* auto-connect if nothing specified or specified device failed */
+        if (!g_seq_connected) {
+            platform_midi_auto_connect();
+        }
+        if (!g_seq_connected) {
+            fprintf(stderr, "[miniwave] MIDI: no device found (will auto-detect)\n");
         }
     }
 
@@ -430,6 +499,22 @@ int main(int argc, char *argv[]) {
         if (pthread_create(&http_tid, NULL, http_thread_fn, &http_ctx) != 0) {
             fprintf(stderr, "[miniwave] WARN: can't create HTTP thread\n");
         }
+    }
+
+    /* ── RT priority + memory lock ────────────────────────────── */
+
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+        fprintf(stderr, "[miniwave] memory locked\n");
+    else
+        fprintf(stderr, "[miniwave] mlockall failed (not root?)\n");
+
+    {
+        struct sched_param sp;
+        sp.sched_priority = 50;
+        if (sched_setscheduler(0, SCHED_FIFO, &sp) == 0)
+            fprintf(stderr, "[miniwave] RT priority: SCHED_FIFO 50\n");
+        else
+            fprintf(stderr, "[miniwave] RT scheduling failed (not root?)\n");
     }
 
     /* ── Audio render loop ─────────────────────────────────────── */

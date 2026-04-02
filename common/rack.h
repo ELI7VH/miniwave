@@ -32,6 +32,7 @@
 #include "fm-drums.h"
 #include "additive.h"
 #include "phase-dist.h"
+#include "bird.h"
 #include "platform.h"
 
 /* ── Constants ──────────────────────────────────────────────────────── */
@@ -253,10 +254,16 @@ static void rack_init(void) {
     rack_register_type(&fm_drums_type);
     rack_register_type(&additive_type);
     rack_register_type(&phase_dist_type);
+    rack_register_type(&bird_type);
 }
+
+static void state_save(void);  /* forward decl */
 
 static int rack_set_slot(int channel, const char *type_name) {
     if (channel < 0 || channel >= MAX_SLOTS) return -1;
+
+    /* Save current state before destroying old instrument */
+    state_save();
 
     int tidx = rack_find_type(type_name);
     if (tidx < 0) {
@@ -304,6 +311,10 @@ static int rack_set_slot(int channel, const char *type_name) {
     slot->mute = 0;
     slot->solo = 0;
     slot->cents_mod = 0.0f;
+    slot->pitch_bend = 0.0f;
+    slot->pitch_bend_range = 2.0f;
+    slot->mod_wheel = 0.0f;
+    slot->vibrato_phase = 0.0f;
 
     /* Allocate slot-level seq and keyseq */
     slot->seq = calloc(1, sizeof(MiniSeq));
@@ -777,19 +788,42 @@ static inline void midi_dispatch_raw(const uint8_t *data, int len) {
 
     switch (type) {
     case 0x90:
+        if (d2 > 0 && slot->mono) {
+            /* mono: kill previous note before playing new one */
+            if (slot->last_note >= 0 && slot->last_note != d1)
+                itype->midi(st, (uint8_t)(0x80 | (status & 0x0F)),
+                            (uint8_t)slot->last_note, 0);
+        }
+        if (d2 > 0 && slot->legato && slot->last_note >= 0) {
+            /* legato: set up portamento glide */
+            slot->glide_from = 440.0f * powf(2.0f, (float)(slot->last_note - 69) / 12.0f);
+            slot->glide_to   = 440.0f * powf(2.0f, (float)(d1 - 69) / 12.0f);
+            slot->glide_pos  = 0.0f;
+        }
+        if (d2 > 0) slot->last_note = d1;
+        else if (slot->mono) slot->last_note = -1;
         itype->midi(st, status, d1, d2);
         if (g_midi_broadcast) g_midi_broadcast(ch, d1, d2, d2 > 0 ? 1 : 0);
         atomic_store(&g_sse_detail_dirty, 1);
         break;
     case 0x80:
+        if (slot->mono && d1 == slot->last_note) slot->last_note = -1;
         itype->midi(st, status, d1, d2);
         if (g_midi_broadcast) g_midi_broadcast(ch, d1, 0, 0);
         atomic_store(&g_sse_detail_dirty, 1);
         break;
-    case 0xE0:
+    case 0xE0: {
+        /* Pitch bend: 14-bit value, center=8192 → -1.0 to +1.0 */
+        int bend14 = (int)d1 | ((int)d2 << 7);
+        slot->pitch_bend = (float)(bend14 - 8192) / 8192.0f;
         itype->midi(st, status, d1, d2);
         break;
+    }
     case 0xB0:
+        /* CC1 = mod wheel → vibrato LFO depth */
+        if (d1 == 1) {
+            slot->mod_wheel = (float)d2 / 127.0f;
+        }
         itype->midi(st, status, d1, d2);
         state_mark_dirty();
         break;
@@ -840,16 +874,48 @@ static void render_mix(float *mix_buf, float *slot_buf, int frames, int sample_r
             if (s_ks)  keyseq_tick(s_ks, tick_dt);
         }
 
-        /* Copy slot keyseq cents_mod → instrument's cents_mod field */
-        if (s_ks) {
-            slot->cents_mod = s_ks->cents_mod;
-            if (strcmp(itype->name, "fm-synth") == 0) ((FMSynth *)st)->cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "sub-synth") == 0) ((SubSynth *)st)->cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "ym2413") == 0) ((YM2413State *)st)->cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "fm-drums") == 0) ((FMDrumState *)st)->cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "additive") == 0) ((AdditiveState *)st)->cents_mod = slot->cents_mod;
-            else if (strcmp(itype->name, "phase-dist") == 0) ((PhaseDistState *)st)->cents_mod = slot->cents_mod;
+        /* Legato portamento glide → cents_mod */
+        if (slot->legato && slot->glide_pos < 1.0f && slot->glide_to > 0.01f) {
+            float glide_dt = (float)frames / (float)sample_rate;
+            slot->glide_pos += glide_dt * slot->glide_rate;
+            if (slot->glide_pos > 1.0f) slot->glide_pos = 1.0f;
+            /* smoothstep for tasty curve */
+            float t = slot->glide_pos;
+            t = t * t * (3.0f - 2.0f * t);
+            float freq = slot->glide_from + (slot->glide_to - slot->glide_from) * t;
+            /* convert freq offset to cents relative to glide_to */
+            float cents = 1200.0f * log2f(freq / slot->glide_to);
+            slot->cents_mod += cents;
         }
+
+        /* Pitch bend → cents */
+        if (slot->pitch_bend != 0.0f) {
+            slot->cents_mod += slot->pitch_bend * slot->pitch_bend_range * 100.0f;
+        }
+
+        /* Mod wheel → vibrato LFO (5.5 Hz sine, depth scaled by mod_wheel) */
+        if (slot->mod_wheel > 0.001f) {
+            float vib_rate = 5.5f; /* Hz */
+            float vib_depth = slot->mod_wheel * 50.0f; /* max ±50 cents */
+            float dt_total = (float)frames / (float)sample_rate;
+            slot->vibrato_phase += vib_rate * dt_total * 6.2831853f;
+            if (slot->vibrato_phase > 6.2831853f)
+                slot->vibrato_phase -= 6.2831853f;
+            slot->cents_mod += sinf(slot->vibrato_phase) * vib_depth;
+        }
+
+        /* Copy keyseq cents_mod to slot, then slot cents_mod to instrument */
+        if (s_ks) slot->cents_mod += s_ks->cents_mod;
+        {
+            float cm = slot->cents_mod;
+            if (strcmp(itype->name, "fm-synth") == 0) ((FMSynth *)st)->cents_mod = cm;
+            else if (strcmp(itype->name, "sub-synth") == 0) ((SubSynth *)st)->cents_mod = cm;
+            else if (strcmp(itype->name, "ym2413") == 0) ((YM2413State *)st)->cents_mod = cm;
+            else if (strcmp(itype->name, "fm-drums") == 0) ((FMDrumState *)st)->cents_mod = cm;
+            else if (strcmp(itype->name, "additive") == 0) ((AdditiveState *)st)->cents_mod = cm;
+            else if (strcmp(itype->name, "phase-dist") == 0) ((PhaseDistState *)st)->cents_mod = cm;
+        }
+        slot->cents_mod = 0; /* reset for next frame */
 
         memset(slot_buf, 0, sizeof(float) * (size_t)(frames * CHANNELS));
         itype->render(st, slot_buf, frames, sample_rate);

@@ -13,7 +13,7 @@ endif
 LDFLAGS = -lasound $(JACK_LDFLAGS) -lm -lpthread -lrt
 
 TARGET = miniwave
-SRC = miniwave.c
+SRC = miniwave.c $(COMMON)/emu2413.c
 COMMON_HDRS = $(COMMON)/osc.h $(COMMON)/instruments.h $(COMMON)/presets.h \
               $(COMMON)/fm-synth.h $(COMMON)/ym2413.h $(COMMON)/sub-synth.h \
               $(COMMON)/platform.h $(COMMON)/rack.h $(COMMON)/server.h \

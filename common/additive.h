@@ -379,10 +379,50 @@ static void additive_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     case 0x80:
         additive_note_off(s, d1);
         break;
-    case 0xB0:
-        if (d1 == 120 || d1 == 123)
+    case 0xB0: {
+        float cc = (float)d2 / 127.0f;
+        switch (d1) {
+        case 14: /* mode — 6 zones */
+            s->mode = (int)(cc * 5.99f) % ADD_MODE_COUNT;
+            s->table_dirty = 1;
+            break;
+        case 15: /* harmonics — 1→64 */
+            s->num_harmonics = 1 + (int)(cc * 63.0f);
+            s->table_dirty = 1;
+            break;
+        case 16: /* ratio — 0.25→4.0 log */
+            s->cluster_ratio = 0.25f * powf(16.0f, cc);
+            s->table_dirty = 1;
+            break;
+        case 17: /* spread — 0→3 */
+            s->cluster_spread = cc * 3.0f;
+            s->table_dirty = 1;
+            break;
+        case 18: /* rolloff — 0.05→1.0 */
+            s->cluster_rolloff = 0.05f + cc * 0.95f;
+            s->table_dirty = 1;
+            break;
+        case 19: /* character — inharmonicity + formant center */
+            s->metal_inharmonicity = cc;
+            s->formant_center = 200.0f + cc * 4800.0f;
+            s->table_dirty = 1;
+            break;
+        case 20: { /* shape — combined attack/decay/sustain macro */
+            /* 0=sharp pluck, 0.5=balanced, 1=slow pad */
+            s->attack = 0.001f * powf(3000.0f, cc);
+            s->decay = 0.05f + (1.0f - cc) * 2.0f;
+            s->sustain = cc * cc;
+            break;
+        }
+        case 21: /* release — 0.01→8s log */
+            s->release = 0.01f * powf(800.0f, cc);
+            break;
+        case 120: case 123:
             for (int i = 0; i < ADD_MAX_VOICES; i++) s->voices[i].active = 0;
+            break;
+        }
         break;
+    }
     }
 }
 

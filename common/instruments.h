@@ -77,6 +77,21 @@ typedef struct {
     MiniSeq         *seq;           /* allocated on slot init, NULL if empty */
     KeySeq          *keyseq;        /* allocated on slot init, NULL if empty */
     float            cents_mod;     /* output from keyseq, fed to calc() */
+
+    /* Pitch bend + mod wheel (vibrato LFO) — per-slot, all instruments */
+    float            pitch_bend;       /* -1.0 to +1.0 from pitch wheel */
+    float            pitch_bend_range; /* semitones per direction, default 2 */
+    float            mod_wheel;        /* 0.0 to 1.0 from CC1 */
+    float            vibrato_phase;    /* LFO phase accumulator */
+
+    /* Mono / Legato — per-slot */
+    int              mono;          /* 1 = mono mode (kill prev note on new) */
+    int              legato;        /* 1 = legato (portamento glide) */
+    float            glide_from;    /* source freq for portamento (Hz) */
+    float            glide_to;      /* target freq (Hz) */
+    float            glide_pos;     /* 0→1 progress */
+    float            glide_rate;    /* glide speed (1/seconds) */
+    int              last_note;     /* last played note (-1 = none) */
 } RackSlot;
 
 /* The rack */

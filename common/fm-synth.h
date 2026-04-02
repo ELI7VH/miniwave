@@ -188,16 +188,54 @@ static void fm_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
     case 0x80: /* Note Off */
         fm_note_off(s, d1);
         break;
-    case 0xB0: /* CC */
-        if (d1 == 0 || d1 == 32) {
-            /* Bank select — use as preset change */
-            int p = d2;
-            if (p >= 0 && p < NUM_PRESETS) {
-                s->current_preset = p;
-                fprintf(stderr, "[fm-synth] preset %d: %s\n", p, PRESET_NAMES[p]);
+    case 0xB0: { /* CC */
+        float cc = (float)d2 / 127.0f;
+        switch (d1) {
+        case 0: case 32: /* bank select = preset */
+            if (d2 < NUM_PRESETS) {
+                s->current_preset = d2;
+                fprintf(stderr, "[fm-synth] preset %d: %s\n", d2, PRESET_NAMES[d2]);
             }
+            break;
+        /* ── Macro knobs CC14-21 ── */
+        case 14: /* mod index — exponential 0→30 */
+            s->live_params.mod_index = 30.0f * cc * cc;
+            s->live_params.override = 1;
+            break;
+        case 15: /* mod ratio — 0.25→16, log */
+            s->live_params.mod_ratio = 0.25f * powf(64.0f, cc);
+            s->live_params.override = 1;
+            break;
+        case 16: /* carrier ratio — 0.25→8, log */
+            s->live_params.carrier_ratio = 0.25f * powf(32.0f, cc);
+            s->live_params.override = 1;
+            break;
+        case 17: /* feedback — 0→2.5 */
+            s->live_params.feedback = cc * 2.5f;
+            s->live_params.override = 1;
+            break;
+        case 18: /* attack — 0.001→3s log */
+            s->live_params.attack = 0.001f * powf(3000.0f, cc);
+            s->live_params.override = 1;
+            break;
+        case 19: /* decay — 0.01→5s log */
+            s->live_params.decay = 0.01f * powf(500.0f, cc);
+            s->live_params.override = 1;
+            break;
+        case 20: /* sustain — 0→1 linear */
+            s->live_params.sustain = cc;
+            s->live_params.override = 1;
+            break;
+        case 21: /* release — 0.01→5s log */
+            s->live_params.release = 0.01f * powf(500.0f, cc);
+            s->live_params.override = 1;
+            break;
+        case 120: case 123:
+            for (int i = 0; i < FM_MAX_VOICES; i++) s->voices[i].active = 0;
+            break;
         }
         break;
+    }
     case 0xC0: /* Program Change */
         if (d1 < NUM_PRESETS) {
             s->current_preset = d1;

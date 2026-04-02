@@ -57,6 +57,7 @@ typedef struct {
     float age;
     int   sample_count;
     int   killing, kill_pos;
+    float lpf_z;  /* one-pole LPF state */
 } PDVoice;
 
 typedef struct {
@@ -214,10 +215,23 @@ static void pd_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
             }
         }
         break;
-    case 0xB0:
-        if (d1 == 120 || d1 == 123)
+    case 0xB0: {
+        float cc = (float)d2 / 127.0f;
+        switch (d1) {
+        case 14: s->distortion = cc; break;
+        case 15: s->timbre = cc; break;
+        case 16: s->mode = (int)(cc * 5.99f) % PD_MODE_COUNT; break;
+        case 17: s->color = cc; break;
+        case 18: s->attack = 0.001f * powf(3000.0f, cc); break;
+        case 19: s->decay = 0.01f * powf(500.0f, cc); break;
+        case 20: s->sustain = cc; break;
+        case 21: s->release = 0.01f * powf(500.0f, cc); break;
+        case 120: case 123:
             for (int i = 0; i < PD_MAX_VOICES; i++) s->voices[i].active = 0;
+            break;
+        }
         break;
+    }
     }
 }
 
@@ -246,7 +260,15 @@ static void pd_render(void *state, float *stereo_buf, int frames, int sample_rat
             /* Generate sample from distorted phase */
             float sample = sinf(dist_phase * PD_TAU);
 
-            /* Color: low-pass via simple one-pole at the output */
+            /* Color: one-pole LPF */
+            if (s->color < 0.99f) {
+                float cutoff_hz = 20.0f * powf(800.0f, s->color); /* 20→16kHz */
+                float rc = 1.0f / (PD_TAU * cutoff_hz);
+                float alpha = dt / (rc + dt);
+                v->lpf_z += alpha * (sample - v->lpf_z);
+                sample = v->lpf_z;
+            }
+
             sample *= env * v->velocity * 0.5f;
 
             /* Anti-click */

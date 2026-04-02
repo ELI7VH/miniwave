@@ -151,27 +151,43 @@ enum {
 /* ── State ─────────────────────────────────────────────────────────── */
 
 static const char *SYNTH_TYPES[] = {
-    "fm-synth", "ym2413", "sub-synth", "fm-drums", "additive", "phase-dist"
+    "fm-synth", "ym2413", "sub-synth", "fm-drums", "additive", "phase-dist", "bird"
 };
 static const char *SYNTH_LABELS[] = {
-    "FM SYNTH", "YM2413", "SUB SYNTH", "FM DRUMS", "ADDITIVE", "PHASE DIST"
+    "FM SYNTH", "YM2413", "SUB SYNTH", "FM DRUMS", "ADDITIVE", "PHASE DIST", "BIRD"
 };
-#define NUM_TYPES 6
+#define NUM_TYPES 7
+
+/* knob labels per synth, 8 knobs each (CC14-21) */
+static const char *KNOB_LABELS[][8] = {
+    /* fm-synth */  {"MOD", "RATIO", "CARR", "FDBK", "ATK", "DEC", "SUS", "REL"},
+    /* ym2413 */    {"INST", "MODLV", "FDBK", "MATK", "MDEC", "CATK", "CDEC", "MMUL"},
+    /* sub-synth */ {"CUT", "RES", "WAVE", "PW", "FENV", "ATK", "SUS", "REL"},
+    /* fm-drums */  {"FREQ", "MFRQ", "MIDX", "SWEP", "DECY", "NOIS", "CLIK", "FDBK"},
+    /* additive */  {"MODE", "HARM", "RATIO", "SPRD", "ROLL", "CHAR", "SHPE", "REL"},
+    /* phase-dist */{"DIST", "TMBR", "MODE", "COLR", "ATK", "DEC", "SUS", "REL"},
+    /* bird */      {"RATE", "DROP", "CURV", "VDEP", "VRAT", "BUZZ", "SHPE", "GAP"},
+};
 
 static int g_type_idx = 0;
 static int g_preset = 0;
 static int g_volume = 80;
 static int g_cpu = 0;
 static int g_channel = 0;
+static int g_mono = 0;
+static int g_legato = 0;
 static int g_mode = MODE_MAIN;
+static int g_flash_ticks = 0;   /* countdown for flash message */
+static char g_flash_msg[32] = "";
 static volatile int g_quit = 0;
 
 /* config menu */
 #define CFG_AUDIO   0
 #define CFG_BUFFER  1
 #define CFG_MIDI    2
-#define CFG_MIDMON  3
-#define CFG_COUNT   4
+#define CFG_RESTART 3
+#define CFG_MIDMON  4
+#define CFG_COUNT   5
 
 static int g_cfg_cursor = 0;
 
@@ -219,6 +235,7 @@ static void term_raw(void) {
     tcgetattr(STDIN_FILENO, &g_orig_termios);
     raw = g_orig_termios;
     raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | ISIG);
+    raw.c_iflag &= (tcflag_t)~(IXON | IXOFF);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
@@ -487,7 +504,7 @@ static void render(void) {
             "\033[1;36m CONFIG\033[0m\n\n");
 
         const char *labels[CFG_COUNT] = {
-            "AUDIO", "BUFFER", "MIDI", "MONITOR"
+            "AUDIO", "BUFFER", "MIDI", "RESTART", "MONITOR"
         };
         for (int i = 0; i < CFG_COUNT; i++) {
             int sel = (i == g_cfg_cursor);
@@ -513,6 +530,8 @@ static void render(void) {
                         "%s", g_mdev_names[g_mdev_sel]);
                 else
                     p += snprintf(out + p, sizeof(out) - (size_t)p, "-");
+                break;
+            case CFG_RESTART:
                 break;
             case CFG_MIDMON:
                 break;
@@ -545,37 +564,45 @@ static void render(void) {
 
     case MODE_MAIN:
     default:
-        /* header + status */
+        /* header */
         p += snprintf(out + p, sizeof(out) - (size_t)p,
-            "\033[1;36m POCKETWAVE\033[0m\n"
-            "\033[90m %d%%",
+            "\033[1;36m POCKETWAVE\033[0m"
+            "\033[90m %d%%\033[0m",
             g_cpu);
-        if (g_batt_pct >= 0) {
+        if (g_flash_ticks > 0)
             p += snprintf(out + p, sizeof(out) - (size_t)p,
-                " %s%d%%\033[90m",
-                g_batt_charging ? "+" : "",
-                g_batt_pct);
-        }
-        p += snprintf(out + p, sizeof(out) - (size_t)p, "\033[0m\n");
+                " \033[1;32m%s\033[0m", g_flash_msg);
+        p += snprintf(out + p, sizeof(out) - (size_t)p, "\n");
 
-        /* selected synth */
+        /* selected synth + mode flags */
         p += snprintf(out + p, sizeof(out) - (size_t)p,
-            " \033[1;37m%s\033[0m\n\n",
+            " \033[1;37m%s\033[0m",
             SYNTH_LABELS[g_type_idx]);
+        if (g_legato)
+            p += snprintf(out + p, sizeof(out) - (size_t)p, " \033[33mLEG\033[0m");
+        else if (g_mono)
+            p += snprintf(out + p, sizeof(out) - (size_t)p, " \033[33mMON\033[0m");
+        p += snprintf(out + p, sizeof(out) - (size_t)p, "\n\n");
 
         /* preset */
         p += snprintf(out + p, sizeof(out) - (size_t)p,
-            " \033[33mP\033[0m %d\n\n",
+            " \033[33mP\033[0m %d\n",
             g_preset);
 
-        /* volume bar */
-        p += snprintf(out + p, sizeof(out) - (size_t)p, " \033[33mV\033[0m ");
-        int bars = g_volume / 10;
-        for (int i = 0; i < 10; i++) {
-            p += snprintf(out + p, sizeof(out) - (size_t)p,
-                "%s", i < bars ? "#" : ".");
+        /* knob labels — two rows of 4 */
+        const char **kn = KNOB_LABELS[g_type_idx];
+        p += snprintf(out + p, sizeof(out) - (size_t)p,
+            "\033[90m");
+        for (int r = 0; r < 2; r++) {
+            p += snprintf(out + p, sizeof(out) - (size_t)p, " ");
+            for (int k = 0; k < 4; k++) {
+                int ki = r * 4 + k;
+                p += snprintf(out + p, sizeof(out) - (size_t)p,
+                    "%-5s", kn[ki]);
+            }
+            p += snprintf(out + p, sizeof(out) - (size_t)p, "\n");
         }
-        p += snprintf(out + p, sizeof(out) - (size_t)p, " %d%%\n", g_volume);
+        p += snprintf(out + p, sizeof(out) - (size_t)p, "\033[0m");
         break;
     }
 
@@ -597,7 +624,8 @@ static void detect_state(void) {
             const char *display_names[] = {
                 "FM Synth (yama-bruh)", "YM2413 OPLL",
                 "Subtractive Synth", "FM Drums",
-                "Additive Synth", "Phase Distortion"
+                "Additive Synth", "Phase Distortion",
+                "Bird"
             };
             for (int i = 0; i < NUM_TYPES; i++) {
                 if (strcmp(sp, display_names[i]) == 0) {
@@ -720,6 +748,48 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
+            /* s — save */
+            if (n == 1 && seq[0] == 's' && g_mode == MODE_MAIN) {
+                /* trigger save by sending current master volume (no-op change) */
+                uint8_t obuf[64];
+                int olen = osc_build(obuf, (int)sizeof(obuf), "/rack/save", "");
+                osc_send(obuf, olen);
+                snprintf(g_flash_msg, sizeof(g_flash_msg), "SAVED");
+                g_flash_ticks = 15;
+                dirty = 1;
+                continue;
+            }
+
+            /* m — toggle mono */
+            if (n == 1 && seq[0] == 'm' && g_mode == MODE_MAIN) {
+                g_mono = !g_mono;
+                uint8_t obuf[64];
+                int olen = osc_build(obuf, (int)sizeof(obuf), "/rack/slot/mono", "ii",
+                                     (int32_t)g_channel, (int32_t)g_mono);
+                osc_send(obuf, olen);
+                snprintf(g_flash_msg, sizeof(g_flash_msg), "MONO %s", g_mono ? "ON" : "OFF");
+                g_flash_ticks = 15;
+                dirty = 1;
+                continue;
+            }
+
+            /* l — toggle legato */
+            if (n == 1 && seq[0] == 'l' && g_mode == MODE_MAIN) {
+                g_legato = !g_legato;
+                if (g_legato) g_mono = 1; /* legato implies mono */
+                uint8_t obuf[64];
+                int olen = osc_build(obuf, (int)sizeof(obuf), "/rack/slot/legato", "ii",
+                                     (int32_t)g_channel, (int32_t)g_legato);
+                osc_send(obuf, olen);
+                olen = osc_build(obuf, (int)sizeof(obuf), "/rack/slot/mono", "ii",
+                                 (int32_t)g_channel, (int32_t)g_mono);
+                osc_send(obuf, olen);
+                snprintf(g_flash_msg, sizeof(g_flash_msg), "LEGATO %s", g_legato ? "ON" : "OFF");
+                g_flash_ticks = 15;
+                dirty = 1;
+                continue;
+            }
+
             /* Enter / Return */
             if (n == 1 && (seq[0] == '\t' || seq[0] == '\r' || seq[0] == '\n')) {
                 if (g_mode == MODE_MAIN) {
@@ -735,6 +805,15 @@ int main(int argc, char *argv[]) {
                     } else if (g_cfg_cursor == CFG_MIDI) {
                         action_apply_midi();
                         g_mode = MODE_MAIN;
+                        dirty = 1;
+                    } else if (g_cfg_cursor == CFG_RESTART) {
+                        /* rescan devices then restart miniwave */
+                        scan_audio_devices();
+                        scan_midi_devices();
+                        action_apply_audio();
+                        g_mode = MODE_MAIN;
+                        snprintf(g_flash_msg, sizeof(g_flash_msg), "RESTARTED");
+                        g_flash_ticks = 15;
                         dirty = 1;
                     } else {
                         /* audio/buffer — apply together, restart miniwave */
@@ -813,7 +892,11 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* CPU + battery update every ~2s */
+        /* flash message countdown */
+        if (g_flash_ticks > 0 && --g_flash_ticks == 0 && g_mode == MODE_MAIN)
+            dirty = 1;
+
+        /* CPU update every ~2s */
         if (++tick >= 20) {
             int cpu = get_cpu_pct();
             if (cpu >= 0 && abs(cpu - g_cpu) > 2) {

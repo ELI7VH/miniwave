@@ -353,6 +353,30 @@ static void sub_synth_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) 
         break;
     case 0xB0: /* CC */
         switch (d1) {
+        case 14: /* macro: filter cutoff */
+            s->params.filter_cutoff = 20.0f * powf(1000.0f, (float)d2 / 127.0f);
+            break;
+        case 15: /* macro: resonance */
+            s->params.filter_reso = (float)d2 / 127.0f;
+            break;
+        case 16: /* macro: waveform */
+            s->params.waveform = (int)((float)d2 / 127.0f * (SUB_WAVE_COUNT - 0.01f));
+            break;
+        case 17: /* macro: pulse width */
+            s->params.pulse_width = 0.05f + (float)d2 / 127.0f * 0.9f;
+            break;
+        case 18: /* macro: filter env depth */
+            s->params.filter_env_depth = (float)d2 / 63.5f - 1.0f; /* -1 to +1 */
+            break;
+        case 19: /* macro: amp attack */
+            s->params.amp_attack = 0.001f + (float)d2 / 127.0f * 5.0f;
+            break;
+        case 20: /* macro: amp sustain */
+            s->params.amp_sustain = (float)d2 / 127.0f;
+            break;
+        case 21: /* macro: amp release */
+            s->params.amp_release = 0.001f + (float)d2 / 127.0f * 5.0f;
+            break;
         case 70: /* waveform */
             s->params.waveform = d2 % SUB_WAVE_COUNT;
             break;

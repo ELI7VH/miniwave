@@ -226,12 +226,41 @@ static void ym2413_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
             fprintf(stderr, "[ym2413] instrument %d: %s\n", d1, OPLL_PATCH_NAMES[d1]);
         }
         break;
-    case 0xB0:
-        if (d1 == 120 || d1 == 123) {
+    case 0xB0: {
+        float cc = (float)d2 / 127.0f;
+        switch (d1) {
+        case 14: /* macro: instrument select 0-15 */
+            ym2413_set_param(state, "instrument", (float)(d2 % 16));
+            break;
+        case 15: /* macro: mod total level 0-63 */
+            ym2413_set_param(state, "mod_tl", (float)(int)(cc * 63.0f));
+            break;
+        case 16: /* macro: feedback 0-7 */
+            ym2413_set_param(state, "feedback", (float)(int)(cc * 7.0f));
+            break;
+        case 17: /* macro: mod attack 0-15 */
+            ym2413_set_param(state, "mod_attack", (float)(int)(cc * 15.0f));
+            break;
+        case 18: /* macro: mod decay 0-15 */
+            ym2413_set_param(state, "mod_decay", (float)(int)(cc * 15.0f));
+            break;
+        case 19: /* macro: car attack 0-15 */
+            ym2413_set_param(state, "car_attack", (float)(int)(cc * 15.0f));
+            break;
+        case 20: /* macro: car decay 0-15 */
+            ym2413_set_param(state, "car_decay", (float)(int)(cc * 15.0f));
+            break;
+        case 21: /* macro: mod multiplier 0-15 */
+            ym2413_set_param(state, "mod_mult", (float)(int)(cc * 15.0f));
+            break;
+        case 120: case 123:
             for (int i = 0; i < OPLL_CHANNELS; i++)
                 if (s->ch_note[i] >= 0) opll_key_off(s, i);
+            break;
         }
+        (void)cc;
         break;
+    }
     }
 }
 

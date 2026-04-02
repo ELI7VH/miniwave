@@ -2070,6 +2070,30 @@ static void *osc_thread_fn(void *arg) {
             fprintf(stderr, "[miniwave] local mute: %s (bus-only)\n",
                     g_rack.local_mute ? "ON" : "OFF");
         }
+        else if (strcmp(osc_addr, "/rack/save") == 0) {
+            state_save();
+            fprintf(stderr, "[miniwave] state saved (OSC)\n");
+        }
+        else if (strcmp(osc_addr, "/rack/slot/mono") == 0 && ai >= 2) {
+            int ch = arg_i[0];
+            if (ch >= 0 && ch < MAX_SLOTS) {
+                g_rack.slots[ch].mono = arg_i[1] ? 1 : 0;
+                g_rack.slots[ch].last_note = -1;
+                fprintf(stderr, "[miniwave] slot %d mono: %s\n", ch,
+                        g_rack.slots[ch].mono ? "ON" : "OFF");
+            }
+        }
+        else if (strcmp(osc_addr, "/rack/slot/legato") == 0 && ai >= 2) {
+            int ch = arg_i[0];
+            if (ch >= 0 && ch < MAX_SLOTS) {
+                g_rack.slots[ch].legato = arg_i[1] ? 1 : 0;
+                g_rack.slots[ch].glide_rate = 5.0f; /* ~200ms glide */
+                g_rack.slots[ch].glide_pos = 1.0f;  /* no glide until next note */
+                if (g_rack.slots[ch].legato) g_rack.slots[ch].mono = 1;
+                fprintf(stderr, "[miniwave] slot %d legato: %s\n", ch,
+                        g_rack.slots[ch].legato ? "ON" : "OFF");
+            }
+        }
         else if (strcmp(osc_addr, "/rack/status") == 0) {
             uint8_t reply[OSC_BUF_SIZE];
             int rpos = 0;

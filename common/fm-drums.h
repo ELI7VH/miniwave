@@ -209,8 +209,40 @@ static void fmd_midi(void *state, uint8_t status, uint8_t d1, uint8_t d2) {
         v->velocity = (float)d2 / 127.0f;
         v->noise_state = (uint32_t)(note * 1103515245 + d2 * 12345) | 1;
     }
-    else if (type == 0xB0 && (d1 == 120 || d1 == 123)) {
-        for (int i = 0; i < FMD_MAX_VOICES; i++) s->voices[i].active = 0;
+    else if (type == 0xB0) {
+        float cc = (float)d2 / 127.0f;
+        int en = s->editing_note;
+        fmd_ensure_note(s, en);
+        FMDrumDef *def = &s->notes[en].def;
+        switch (d1) {
+        case 14: /* macro: carrier freq 20-2000 Hz log */
+            def->carrier_freq = 20.0f * powf(100.0f, cc);
+            break;
+        case 15: /* macro: mod freq 20-8000 Hz log */
+            def->mod_freq = 20.0f * powf(400.0f, cc);
+            break;
+        case 16: /* macro: mod index 0-10 */
+            def->mod_index = cc * 10.0f;
+            break;
+        case 17: /* macro: pitch sweep -400 to +400 Hz */
+            def->pitch_sweep = (cc - 0.5f) * 800.0f;
+            break;
+        case 18: /* macro: decay 0.01-2s log */
+            def->decay = 0.01f * powf(200.0f, cc);
+            break;
+        case 19: /* macro: noise amount 0-1 */
+            def->noise_amt = cc;
+            break;
+        case 20: /* macro: click amount 0-1 */
+            def->click_amt = cc;
+            break;
+        case 21: /* macro: feedback 0-1 */
+            def->feedback = cc;
+            break;
+        case 120: case 123:
+            for (int i = 0; i < FMD_MAX_VOICES; i++) s->voices[i].active = 0;
+            break;
+        }
     }
 }
 

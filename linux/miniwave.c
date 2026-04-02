@@ -46,6 +46,12 @@ static int               g_seq_port = -1;
 static snd_seq_addr_t    g_seq_src = {0,0};
 static int               g_seq_connected = 0;
 
+/* MPK multi-port: notes from MIDI port, CCs from DAW port */
+#define MPK_PORT_MIDI  0   /* ALSA port index: MIDI Port */
+#define MPK_PORT_DAW   2   /* ALSA port index: DAW Port */
+static int               g_mpk_client = -1;  /* ALSA client ID of MPK */
+static int               g_mpk_multi = 0;    /* 1 = multi-port mode active */
+
 static int platform_midi_init(void) {
     int err = snd_seq_open(&g_seq, "default", SND_SEQ_OPEN_INPUT, SND_SEQ_NONBLOCK);
     if (err < 0) {
@@ -69,12 +75,54 @@ static int platform_midi_init(void) {
     return 0;
 }
 
+/* Connect to all readable ports of a given client (multi-port mode) */
+static int platform_midi_connect_all(int client) {
+    if (!g_seq) return -1;
+    int connected = 0;
+
+    snd_seq_port_info_t *pinfo;
+    snd_seq_port_info_alloca(&pinfo);
+    snd_seq_port_info_set_client(pinfo, client);
+    snd_seq_port_info_set_port(pinfo, -1);
+
+    while (snd_seq_query_next_port(g_seq, pinfo) >= 0) {
+        unsigned int caps = snd_seq_port_info_get_capability(pinfo);
+        if (!(caps & SND_SEQ_PORT_CAP_READ)) continue;
+        if (!(caps & SND_SEQ_PORT_CAP_SUBS_READ)) continue;
+
+        int port = snd_seq_port_info_get_port(pinfo);
+        const char *pname = snd_seq_port_info_get_name(pinfo);
+
+        int err = snd_seq_connect_from(g_seq, g_seq_port, client, port);
+        if (err >= 0) {
+            fprintf(stderr, "[miniwave] MIDI subscribed: %d:%d (%s)\n",
+                    client, port, pname ? pname : "?");
+            connected++;
+        }
+    }
+    return connected;
+}
+
 static int platform_midi_connect(const char *addr_str) {
     if (!g_seq) return -1;
 
     if (g_seq_connected) {
-        snd_seq_disconnect_from(g_seq, g_seq_port, g_seq_src.client, g_seq_src.port);
+        if (g_mpk_multi && g_mpk_client >= 0) {
+            /* Disconnect all ports of old MPK client */
+            snd_seq_port_info_t *pinfo;
+            snd_seq_port_info_alloca(&pinfo);
+            snd_seq_port_info_set_client(pinfo, g_mpk_client);
+            snd_seq_port_info_set_port(pinfo, -1);
+            while (snd_seq_query_next_port(g_seq, pinfo) >= 0) {
+                int port = snd_seq_port_info_get_port(pinfo);
+                snd_seq_disconnect_from(g_seq, g_seq_port, g_mpk_client, port);
+            }
+        } else {
+            snd_seq_disconnect_from(g_seq, g_seq_port, g_seq_src.client, g_seq_src.port);
+        }
         g_seq_connected = 0;
+        g_mpk_multi = 0;
+        g_mpk_client = -1;
         g_midi_device_name[0] = '\0';
     }
 
@@ -86,6 +134,28 @@ static int platform_midi_connect(const char *addr_str) {
         return -1;
     }
 
+    /* Check if this client is an MPK mini IV — if so, connect ALL ports */
+    snd_seq_client_info_t *cinfo;
+    snd_seq_client_info_alloca(&cinfo);
+    const char *cname = NULL;
+    if (snd_seq_get_any_client_info(g_seq, addr.client, cinfo) >= 0)
+        cname = snd_seq_client_info_get_name(cinfo);
+
+    if (cname && strstr(cname, "MPK mini")) {
+        int n = platform_midi_connect_all(addr.client);
+        if (n > 0) {
+            g_mpk_client = addr.client;
+            g_mpk_multi = 1;
+            g_seq_src = addr;
+            g_seq_connected = 1;
+            snprintf(g_midi_device_name, sizeof(g_midi_device_name),
+                     "%s [multi:%d ports]", cname, n);
+            fprintf(stderr, "[miniwave] MPK multi-port mode: %s (%d ports)\n", cname, n);
+            return 0;
+        }
+    }
+
+    /* Single-port fallback */
     err = snd_seq_connect_from(g_seq, g_seq_port, addr.client, addr.port);
     if (err < 0) {
         fprintf(stderr, "[miniwave] can't subscribe to %s: %s\n",
@@ -95,12 +165,12 @@ static int platform_midi_connect(const char *addr_str) {
 
     g_seq_src = addr;
     g_seq_connected = 1;
+    g_mpk_multi = 0;
+    g_mpk_client = -1;
 
-    snd_seq_client_info_t *cinfo;
-    snd_seq_client_info_alloca(&cinfo);
-    if (snd_seq_get_any_client_info(g_seq, addr.client, cinfo) >= 0) {
+    if (cname) {
         snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%s (%d:%d)",
-                 snd_seq_client_info_get_name(cinfo), addr.client, addr.port);
+                 cname, addr.client, addr.port);
     } else {
         snprintf(g_midi_device_name, sizeof(g_midi_device_name), "%d:%d",
                  addr.client, addr.port);
@@ -156,10 +226,83 @@ static int platform_midi_list_devices(char devices[][64], char names[][128], int
     return count;
 }
 
-/* Dispatch ALSA sequencer event to rack */
+/* Rate-limited SSE broadcast of ch_status after MIDI param changes */
+static struct timespec g_last_sse_push[MAX_SLOTS] = {{0}};
+
+static void midi_push_ch_status(int ch) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - g_last_sse_push[ch].tv_sec) * 1000
+            + (now.tv_nsec - g_last_sse_push[ch].tv_nsec) / 1000000;
+    if (ms < 50) return;  /* throttle to 20Hz per channel */
+    g_last_sse_push[ch] = now;
+
+    char json[SSE_BUF_SIZE];
+    build_ch_status_json(ch, json, (int)sizeof(json));
+    sse_broadcast("ch_status", json);
+}
+
+/* Dispatch ALSA sequencer event to rack.
+ * In MPK multi-port mode, filter by source port:
+ *   - MIDI port (0): notes, pitchbend, aftertouch, program change
+ *   - DAW port (2):  CCs (knobs, transport, encoder)
+ *   - Other ports:   accept everything (generic controllers)
+ */
 static inline void seq_dispatch(snd_seq_event_t *ev) {
     int ch = ev->data.note.channel;
     if (ch < 0 || ch >= MAX_SLOTS) return;
+
+    int src_port = ev->source.port;
+    int is_mpk = (g_mpk_multi && ev->source.client == g_mpk_client);
+
+    /* ── MPK port filtering ──────────────────────────────────────── */
+    if (is_mpk) {
+        int is_note = (ev->type == SND_SEQ_EVENT_NOTEON ||
+                       ev->type == SND_SEQ_EVENT_NOTEOFF);
+        int is_cc   = (ev->type == SND_SEQ_EVENT_CONTROLLER);
+        int is_perf = (ev->type == SND_SEQ_EVENT_PITCHBEND ||
+                       ev->type == SND_SEQ_EVENT_CHANPRESS ||
+                       ev->type == SND_SEQ_EVENT_PGMCHANGE);
+
+        /* MIDI port → notes + performance only */
+        if (src_port == MPK_PORT_MIDI && !(is_note || is_perf))
+            return;
+        /* DAW port → CCs only */
+        if (src_port == MPK_PORT_DAW && !is_cc)
+            return;
+        /* Other MPK ports → drop (Din port duplicates, Software port unused) */
+        if (src_port != MPK_PORT_MIDI && src_port != MPK_PORT_DAW)
+            return;
+    }
+
+    /* ── MPK DAW CC handlers ─────────────────────────────────────── */
+    if (ev->type == SND_SEQ_EVENT_CONTROLLER) {
+        int param = ev->data.control.param;
+        int val   = ev->data.control.value;
+
+        /* CC14 encoder: cycle instrument (val=1 down, val=127 up) */
+        if (param == 14) {
+            RackSlot *slot = &g_rack.slots[ch];
+            int dir = (val == 1) ? -1 : 1;
+            int cur = (slot->active) ? slot->type_idx : -dir;
+            int next = (cur + dir + g_n_types) % g_n_types;
+            rack_set_slot(ch, g_type_registry[next]->name);
+            fprintf(stderr, "[miniwave] ch%d → %s\n", ch, g_type_registry[next]->name);
+            midi_push_ch_status(ch);
+            return;
+        }
+
+        /* CC15/16: preset bank down/up (val=127 press, val=0 release) */
+        if ((param == 15 || param == 16) && val == 127) {
+            /* TODO: cycle patches */
+            return;
+        }
+
+        /* CC24-31 knobs → remap to macro CC14-21 */
+        if (param >= 24 && param <= 31) {
+            ev->data.control.param = param - 10;
+        }
+    }
 
     RackSlot *slot = &g_rack.slots[ch];
     if (!slot->active || !slot->state) return;
@@ -179,10 +322,17 @@ static inline void seq_dispatch(snd_seq_event_t *ev) {
                     0);
         break;
     case SND_SEQ_EVENT_CONTROLLER:
+        /* CC1 = mod wheel → slot vibrato depth */
+        if (ev->data.control.param == 1) {
+            slot->mod_wheel = (float)ev->data.control.value / 127.0f;
+        }
         itype->midi(slot->state,
                     (uint8_t)(0xB0 | ch),
                     (uint8_t)ev->data.control.param,
                     (uint8_t)ev->data.control.value);
+        /* Push UI update for macro knob CCs */
+        if (ev->data.control.param >= 14 && ev->data.control.param <= 21)
+            midi_push_ch_status(ch);
         break;
     case SND_SEQ_EVENT_PGMCHANGE:
         itype->midi(slot->state,
@@ -194,6 +344,8 @@ static inline void seq_dispatch(snd_seq_event_t *ev) {
         int val = ev->data.control.value + 8192;
         if (val < 0) val = 0;
         if (val > 16383) val = 16383;
+        /* Set slot pitch bend for rack-level processing */
+        slot->pitch_bend = (float)(val - 8192) / 8192.0f;
         itype->midi(slot->state,
                     (uint8_t)(0xE0 | ch),
                     (uint8_t)(val & 0x7F),
