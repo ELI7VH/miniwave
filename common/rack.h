@@ -284,6 +284,25 @@ static int rack_set_slot(int channel, const char *type_name) {
     int old_type_idx = slot->type_idx;
     int was_active = slot->active;
 
+    /* Cache old instrument state before destroying it */
+    if (was_active && old_state && old_type_idx >= 0
+        && old_type_idx < SLOT_CACHE_TYPES) {
+        InstrumentType *old_type = g_type_registry[old_type_idx];
+        if (old_type->json_save) {
+            int n = old_type->json_save(old_state,
+                        slot->state_cache[old_type_idx],
+                        (int)sizeof(slot->state_cache[old_type_idx]));
+            slot->state_cache_valid[old_type_idx] = (n > 0) ? 1 : 0;
+        }
+    }
+
+    /* Restore cached state for the new instrument type if available */
+    if (tidx < SLOT_CACHE_TYPES
+        && slot->state_cache_valid[tidx] && itype->json_load) {
+        itype->json_load(new_state, slot->state_cache[tidx]);
+        fprintf(stderr, "[miniwave] restored cached state for %s\n", itype->name);
+    }
+
     /* Deactivate slot — atomic store ensures render/MIDI see it immediately */
     atomic_store(&slot->active, 0);
     atomic_fetch_add(&slot->gen, 1);

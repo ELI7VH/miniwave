@@ -590,18 +590,18 @@ static int fm_synth_json_load(void *state, const char *json) {
     int ovr;
     if (json_get_int(json, "override", &ovr) == 0 && ovr) {
         s->live_params.override = 1;
+        /* Try "params" subtree first (rack.json format), then flat keys (cache format) */
         const char *pp = strstr(json, "\"params\"");
-        if (pp) {
-            float fv;
-            if (json_get_float(pp, "carrier_ratio", &fv) == 0) s->live_params.carrier_ratio = fv;
-            if (json_get_float(pp, "mod_ratio", &fv) == 0) s->live_params.mod_ratio = fv;
-            if (json_get_float(pp, "mod_index", &fv) == 0) s->live_params.mod_index = fv;
-            if (json_get_float(pp, "attack", &fv) == 0) s->live_params.attack = fv;
-            if (json_get_float(pp, "decay", &fv) == 0) s->live_params.decay = fv;
-            if (json_get_float(pp, "sustain", &fv) == 0) s->live_params.sustain = fv;
-            if (json_get_float(pp, "release", &fv) == 0) s->live_params.release = fv;
-            if (json_get_float(pp, "feedback", &fv) == 0) s->live_params.feedback = fv;
-        }
+        if (!pp) pp = json;
+        float fv;
+        if (json_get_float(pp, "carrier_ratio", &fv) == 0) s->live_params.carrier_ratio = fv;
+        if (json_get_float(pp, "mod_ratio", &fv) == 0) s->live_params.mod_ratio = fv;
+        if (json_get_float(pp, "mod_index", &fv) == 0) s->live_params.mod_index = fv;
+        if (json_get_float(pp, "attack", &fv) == 0) s->live_params.attack = fv;
+        if (json_get_float(pp, "decay", &fv) == 0) s->live_params.decay = fv;
+        if (json_get_float(pp, "sustain", &fv) == 0) s->live_params.sustain = fv;
+        if (json_get_float(pp, "release", &fv) == 0) s->live_params.release = fv;
+        if (json_get_float(pp, "feedback", &fv) == 0) s->live_params.feedback = fv;
     }
     return 0;
 }

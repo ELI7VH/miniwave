@@ -10,27 +10,24 @@ ENGINE_ONLY=0
 CONFIG="$HOME/.config/pocketwave/config"
 LOGDIR="/tmp"
 
-# Source config (or defaults)
-AUDIO_DEV="hw:2,0"
 AUDIO_FALLBACK="hw:0,0"
 BUFFER_SIZE=256
-MIDI_DEV="20:0"
+MIDI_DEV="auto"
 CHANNELS=1
 
-if [ -f "$CONFIG" ]; then
-    . "$CONFIG"
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# Auto-detect UCA202
+AUDIO_DEV="$AUDIO_FALLBACK"
+USB_CARD=$(aplay -l 2>/dev/null | grep -i "USB Audio CODEC" | head -1 | sed 's/card \([0-9]*\).*/\1/')
+if [ -n "$USB_CARD" ]; then
+    AUDIO_DEV="hw:${USB_CARD},0"
+    echo "pocketwave: found UCA202 at $AUDIO_DEV"
 fi
 
-# Probe audio device — fall back if USB not present
-CARD_NUM=$(echo "$AUDIO_DEV" | sed 's/hw:\([0-9]*\).*/\1/')
-if ! aplay -l 2>/dev/null | grep -q "card $CARD_NUM:"; then
-    echo "pocketwave: $AUDIO_DEV not found, falling back to $AUDIO_FALLBACK"
-    AUDIO_DEV="$AUDIO_FALLBACK"
-fi
-
-# ALSA mixer setup for sun4i-codec
+# ALSA mixer setup for onboard codec
 if echo "$AUDIO_DEV" | grep -q "hw:0"; then
-    /usr/local/bin/pocketwave-alsa-setup
+    /usr/local/bin/pocketwave-alsa-setup 2>/dev/null || true
 fi
 
 # Kill any existing miniwave

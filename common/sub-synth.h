@@ -642,7 +642,8 @@ static int sub_synth_json_save(void *state, char *buf, int max) {
 static int sub_synth_json_load(void *state, const char *json) {
     SubSynth *s = (SubSynth *)state;
     const char *pp = strstr(json, "\"params\"");
-    if (pp) {
+    if (!pp) pp = json;
+    {
         int wf;
         float fv;
         if (json_get_int(pp, "waveform", &wf) == 0) s->params.waveform = wf % SUB_WAVE_COUNT;

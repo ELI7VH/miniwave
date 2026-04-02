@@ -138,6 +138,90 @@ static void update_battery(void) {
     }
 }
 
+/* ── HTTP poll — sync state from miniwave API ─────────────────────── */
+
+static int http_poll_rack(int *out_type_idx, int *out_preset, char *out_preset_name, int name_max) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+
+    /* Request ch_status for channel 0 */
+    const char *req = "POST /api HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{\"type\":\"ch_status\",\"channel\":0}";
+    write(sock, req, strlen(req));
+
+    char buf[4096];
+    int total = 0;
+    while (total < (int)sizeof(buf) - 1) {
+        int n = (int)read(sock, buf + total, sizeof(buf) - 1 - (size_t)total);
+        if (n <= 0) break;
+        total += n;
+    }
+    buf[total] = '\0';
+    close(sock);
+
+    /* Find JSON body after headers */
+    char *body = strstr(buf, "\r\n\r\n");
+    if (!body) return -1;
+    body += 4;
+
+    /* Parse instrument_type */
+    char *tp = strstr(body, "\"instrument_type\":\"");
+    if (tp) {
+        tp += 19;
+        char *end = strchr(tp, '"');
+        if (end) {
+            char type_str[32];
+            int len = (int)(end - tp);
+            if (len > 31) len = 31;
+            memcpy(type_str, tp, (size_t)len);
+            type_str[len] = '\0';
+            /* Match to known types */
+            const char *types[] = {"fm-synth","ym2413","sub-synth","fm-drums","additive","phase-dist","bird"};
+            for (int i = 0; i < 7; i++) {
+                if (strcmp(type_str, types[i]) == 0) {
+                    *out_type_idx = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Parse preset_name */
+    char *pn = strstr(body, "\"preset_name\":\"");
+    if (pn && out_preset_name) {
+        pn += 15;
+        char *end = strchr(pn, '"');
+        if (end) {
+            int len = (int)(end - pn);
+            if (len >= name_max) len = name_max - 1;
+            memcpy(out_preset_name, pn, (size_t)len);
+            out_preset_name[len] = '\0';
+        }
+    }
+
+    /* Parse preset_index */
+    char *pi = strstr(body, "\"preset_index\":");
+    if (pi && out_preset) {
+        *out_preset = atoi(pi + 15);
+    }
+
+    return 0;
+}
+
 /* ── UI modes ──────────────────────────────────────────────────────── */
 
 enum {
@@ -895,6 +979,20 @@ int main(int argc, char *argv[]) {
         /* flash message countdown */
         if (g_flash_ticks > 0 && --g_flash_ticks == 0 && g_mode == MODE_MAIN)
             dirty = 1;
+
+        /* Sync rack state every ~1s */
+        if (tick % 10 == 5 && g_mode == MODE_MAIN) {
+            int new_type = g_type_idx;
+            int new_preset = g_preset;
+            char pname[32] = "";
+            if (http_poll_rack(&new_type, &new_preset, pname, (int)sizeof(pname)) == 0) {
+                if (new_type != g_type_idx || new_preset != g_preset) {
+                    g_type_idx = new_type;
+                    g_preset = new_preset;
+                    dirty = 1;
+                }
+            }
+        }
 
         /* CPU update every ~2s */
         if (++tick >= 20) {

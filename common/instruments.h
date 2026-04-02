@@ -84,6 +84,11 @@ typedef struct {
     float            mod_wheel;        /* 0.0 to 1.0 from CC1 */
     float            vibrato_phase;    /* LFO phase accumulator */
 
+    /* State cache — preserves instrument params when cycling types */
+    #define SLOT_CACHE_TYPES 32
+    char             state_cache[SLOT_CACHE_TYPES][2048];
+    int              state_cache_valid[SLOT_CACHE_TYPES];
+
     /* Mono / Legato — per-slot */
     int              mono;          /* 1 = mono mode (kill prev note on new) */
     int              legato;        /* 1 = legato (portamento glide) */
